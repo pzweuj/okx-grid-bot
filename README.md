@@ -31,8 +31,8 @@
 
 1.  **克隆仓库**:
     ```bash
-    git clone https://github.com/EBOLABOY/GridOKB-USDT
-    cd GridOKB-USDT
+    git clone https://github.com/tingxifa/okx-grid-bot
+    cd okx-grid-bot
     ```
 
 2.  **创建并激活虚拟环境**:
@@ -103,8 +103,8 @@ python main.py
 ```bash
 # 拉取代码
 #（如已在上方步骤完成可跳过）
-git clone https://github.com/EBOLABOY/GridOKB-USDT
-cd GridOKB-USDT
+git clone https://github.com/tingxifa/okx-grid-bot
+cd okx-grid-bot
 # 部署镜像
 docker-compose up -d
 ```
