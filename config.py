@@ -9,7 +9,7 @@ QUOTE_SYMBOL = 'USDT'  # 计价币种
 SYMBOL = f"{BASE_SYMBOL}-{QUOTE_SYMBOL}"  # OKX使用-而不是/作为分隔符
 BASE_CURRENCY = BASE_SYMBOL
 
-FLAG = 1  # 0为实盘，1为模拟
+FLAG = '1'  # 0为实盘，1为模拟
 
 INITIAL_GRID = 2.0
 FLIP_THRESHOLD = lambda grid_size: (grid_size / 5) / 100  # 网格大小的1/5的1%
