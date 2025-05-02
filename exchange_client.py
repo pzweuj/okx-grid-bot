@@ -23,7 +23,8 @@ class ExchangeClient:
         self.secret_key = os.getenv('OKX_SECRET_KEY')
         self.passphrase = os.getenv('OKX_PASSPHRASE')
 # export https_proxy=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 all_proxy=socks5://127.0.0.1:7890
-        self.proxy = httpx.Proxy(url='http://127.0.0.1:7890')
+        # self.proxy = httpx.Proxy(url='http://127.0.0.1:7890')
+        self.proxy = None
         
         # 初始化各个API模块
         self.market_api = MarketData.MarketAPI(
