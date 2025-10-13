@@ -123,9 +123,11 @@ class ExchangeClient:
             else:
                 error_msg = f"获取K线数据失败: {result['msg']} | 错误码: {result['code']} | 参数: symbol={symbol}, timeframe={timeframe}, limit={limit}"
                 self.logger.error(error_msg)
+                return None
         except Exception as e:
             error_msg = f"获取K线数据失败: {str(e)} | 堆栈信息: {traceback.format_exc()} | 参数: symbol={symbol}, timeframe={timeframe}, limit={limit}"
-            raise Exception(error_msg)
+            self.logger.error(error_msg)
+            return None
 
     async def fetch_ticker(self, symbol):
         self.logger.debug(f"获取行情数据 {symbol}...")

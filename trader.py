@@ -1041,7 +1041,10 @@ class GridTrader:
         """获取当前价格在历史中的分位位置"""
         try:
             # 获取过去7天价格数据（使用4小时K线）
-            ohlcv = await self.exchange.fetch_ohlcv(self.config.SYMBOL, '4h', limit=42)  # 42根4小时K线 ≈ 7天
+            ohlcv = await self.exchange.fetch_ohlcv(self.config.SYMBOL, '4H', limit=42)  # 42根4小时K线 ≈ 7天
+            if not ohlcv:
+                self.logger.warning("获取K线数据为空，使用默认分位值")
+                return 0.5
             closes = [candle[4] for candle in ohlcv]
             current_price = await self._get_latest_price()
             
@@ -1216,6 +1219,7 @@ class GridTrader:
             # 获取现货和理财账户余额
             balance = await self.exchange.fetch_balance()
             funding_balance = await self.exchange.fetch_funding_balance()
+            savings_balance = await self.exchange.fetch_savings_balance()
             total_assets = await self._get_total_assets()
             current_price = await self._get_latest_price()
             
@@ -1227,16 +1231,26 @@ class GridTrader:
             usdt_balance = float(balance['free'].get('USDT', 0))
             coin_balance = float(balance['free'].get(self.symbol_info['base'], 0))
             
-            # 计算总余额（现货+理财）
-            total_usdt = usdt_balance + float(funding_balance.get('USDT', 0))
-            total_okb = coin_balance + float(funding_balance.get(self.symbol_info['base'], 0))
+            # 获取资金账户余额
+            funding_usdt = float(funding_balance.get('USDT', 0))
+            funding_okb = float(funding_balance.get(self.symbol_info['base'], 0))
+            
+            # 获取简单赚币余额
+            savings_usdt = float(savings_balance.get('USDT', 0) or 0)
+            savings_okb = float(savings_balance.get(self.symbol_info['base'], 0) or 0)
+            
+            # 计算总余额（现货+资金账户+简单赚币）
+            total_usdt = usdt_balance + funding_usdt + savings_usdt
+            total_okb = coin_balance + funding_okb + savings_okb
             
             # 调整USDT余额
-            if usdt_balance > target_usdt:
+            # 现货+资金账户的总和
+            available_usdt = usdt_balance + funding_usdt
+            
+            if available_usdt > target_usdt:
                 # 多余的申购到理财
-                transfer_amount = usdt_balance - target_usdt
-                # --- 添加最小申购金额检查 ---
-                if transfer_amount >= 1.0:  # 通常USDT划转的最小额度是1.0
+                transfer_amount = usdt_balance - target_usdt  # 只从现货转出
+                if transfer_amount > 0 and transfer_amount >= 1.0:  # 通常USDT划转的最小额度是1.0
                     self.logger.info(f"发现可划转USDT: {transfer_amount}")
                     try:
                         await self.exchange.transfer_to_savings('USDT', transfer_amount)
@@ -1245,26 +1259,34 @@ class GridTrader:
                         self.logger.error(f"申购USDT到理财失败: {str(e_savings)} | 堆栈信息: {traceback.format_exc()}")
                 else:
                     self.logger.info(f"可划转USDT ({transfer_amount:.2f}) 低于最小申购额1.0 USDT，跳过申购")
-            elif usdt_balance < target_usdt:
-                # 不足的从理财赎回
-                transfer_amount = target_usdt - usdt_balance
-                if transfer_amount >= 1.0:
-                    self.logger.info(f"从理财赎回USDT: {transfer_amount}")
+            elif available_usdt < target_usdt:
+                # 现货+资金账户不足，需要从简单赚币赎回
+                transfer_amount = target_usdt - available_usdt
+                
+                # 检查简单赚币中是否有足够的USDT
+                if savings_usdt < 1.0:
+                    self.logger.info(f"简单赚币USDT余额({savings_usdt:.2f})不足最小赎回金额(1.0)，跳过赎回")
+                elif transfer_amount >= 1.0:
+                    # 实际赎回金额不能超过简单赚币余额
+                    actual_transfer = min(transfer_amount, savings_usdt)
+                    self.logger.info(f"从理财赎回USDT: {actual_transfer:.2f} (需要: {transfer_amount:.2f}, 可用: {savings_usdt:.2f})")
                     try:
-                        await self.exchange.transfer_to_spot('USDT', transfer_amount)
-                        self.logger.info(f"已从理财赎回 {transfer_amount:.2f} USDT")
+                        await self.exchange.transfer_to_spot('USDT', actual_transfer)
+                        self.logger.info(f"已从理财赎回 {actual_transfer:.2f} USDT")
                     except Exception as e_spot:
                         self.logger.error(f"从理财赎回USDT失败: {str(e_spot)} | 堆栈信息: {traceback.format_exc()}")
                 else:
                     self.logger.info(f"需要从理财赎回的USDT金额 ({transfer_amount:.2f}) 过小，跳过")
             
             # 调整OKB余额
-            if coin_balance > target_okb:
+            # 现货+资金账户的总和
+            available_okb = coin_balance + funding_okb
+            
+            if available_okb > target_okb:
                 # 多余的申购到理财
-                transfer_amount = coin_balance - target_okb
-                self.logger.info(f"发现可划转{self.symbol_info['base']}: {transfer_amount}")
-                # --- 添加最小申购金额检查 ---
-                if transfer_amount >= 0.01:
+                transfer_amount = coin_balance - target_okb  # 只从现货转出
+                if transfer_amount > 0 and transfer_amount >= 0.01:
+                    self.logger.info(f"发现可划转{self.symbol_info['base']}: {transfer_amount}")
                     try:
                         await self.exchange.transfer_to_savings(self.symbol_info['base'], transfer_amount)
                         self.logger.info(f"已将 {transfer_amount:.4f} {self.symbol_info['base']} 申购到理财")
@@ -1272,17 +1294,24 @@ class GridTrader:
                         self.logger.error(f"申购{self.symbol_info['base']}到理财失败: {str(e_savings)} | 堆栈信息: {traceback.format_exc()}")
                 else:
                     self.logger.info(f"可划转{self.symbol_info['base']} ({transfer_amount:.4f}) 低于最小申购额 0.01 {self.symbol_info['base']}，跳过申购")
-            elif coin_balance < target_okb:
-                # 不足的从理财赎回
-                transfer_amount = target_okb - coin_balance
-                self.logger.info(f"从理财赎回{self.symbol_info['base']}: {transfer_amount}")
-                # 赎回操作通常有不同的最低限额，或者限额较低，这里暂时不加检查
-                # 如果赎回也遇到 -6005，需要在这里也加上对应的赎回最小额检查
-                try:
-                    await self.exchange.transfer_to_spot(self.symbol_info['base'], transfer_amount)
-                    self.logger.info(f"已从理财赎回 {transfer_amount:.4f} {self.symbol_info['base']}")
-                except Exception as e_spot:
-                     self.logger.error(f"从理财赎回{self.symbol_info['base']}失败: {str(e_spot)} | 堆栈信息: {traceback.format_exc()}")
+            elif available_okb < target_okb:
+                # 现货+资金账户不足，需要从简单赚币赎回
+                transfer_amount = target_okb - available_okb
+                
+                # 检查简单赚币中是否有足够的OKB
+                if savings_okb < 0.001:
+                    self.logger.info(f"简单赚币{self.symbol_info['base']}余额({savings_okb:.8f})不足最小赎回金额(0.001)，跳过赎回")
+                elif transfer_amount >= 0.001:
+                    # 实际赎回金额不能超过简单赚币余额
+                    actual_transfer = min(transfer_amount, savings_okb)
+                    self.logger.info(f"从理财赎回{self.symbol_info['base']}: {actual_transfer:.8f} (需要: {transfer_amount:.8f}, 可用: {savings_okb:.8f})")
+                    try:
+                        await self.exchange.transfer_to_spot(self.symbol_info['base'], actual_transfer)
+                        self.logger.info(f"已从理财赎回 {actual_transfer:.4f} {self.symbol_info['base']}")
+                    except Exception as e_spot:
+                        self.logger.error(f"从理财赎回{self.symbol_info['base']}失败: {str(e_spot)} | 堆栈信息: {traceback.format_exc()}")
+                else:
+                    self.logger.info(f"需要从理财赎回的{self.symbol_info['base']}金额 ({transfer_amount:.8f}) 过小，跳过")
             
             self.logger.info(
                 f"资金分配完成\n"
