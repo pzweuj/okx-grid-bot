@@ -1,7 +1,7 @@
 import logging
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
-from config import PUSHPLUS_TOKEN
+from config import WECHAT_WEBHOOK_KEY
 import time
 import psutil
 import os
@@ -46,29 +46,43 @@ def format_trade_message(side, symbol, price, amount, total, grid_size, retry_co
     
     return message
 
-def send_pushplus_message(content, title="交易信号通知"):
-    if not PUSHPLUS_TOKEN:
-        logging.error("未配置PUSHPLUS_TOKEN，无法发送通知")
+def send_wechat_message(content, title="交易信号通知"):
+    """发送企业微信机器人消息
+    
+    Args:
+        content (str): 消息内容
+        title (str): 消息标题
+    """
+    if not WECHAT_WEBHOOK_KEY or WECHAT_WEBHOOK_KEY == "your_webhook_key_here":
+        logging.debug("未配置有效的WECHAT_WEBHOOK_KEY，跳过推送通知")
         return
     
-    url = "https://www.pushplus.plus/send"
+    url = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={WECHAT_WEBHOOK_KEY}"
+    
+    # 构建markdown格式的消息
+    markdown_content = f"### {title}\n{content}"
+    
     data = {
-        "token": PUSHPLUS_TOKEN,
-        "title": title,
-        "content": content,
-        "template": "txt"  # 使用文本模板
+        "msgtype": "markdown",
+        "markdown": {
+            "content": markdown_content
+        }
     }
+    
     try:
-        logging.info(f"正在发送推送通知: {title}")
-        response = requests.post(url, data=data)
+        logging.info(f"正在发送企业微信推送通知: {title}")
+        response = requests.post(url, json=data)
         response_json = response.json()
         
-        if response.status_code == 200 and response_json.get('code') == 200:
-            logging.info(f"消息推送成功: {content}")
+        if response.status_code == 200 and response_json.get('errcode') == 0:
+            logging.info(f"企业微信消息推送成功: {title}")
         else:
-            logging.error(f"消息推送失败: 状态码={response.status_code}, 响应={response_json}")
+            logging.error(f"企业微信消息推送失败: 状态码={response.status_code}, 响应={response_json}")
     except Exception as e:
-        logging.error(f"消息推送异常: {str(e)}", exc_info=True)
+        logging.error(f"企业微信消息推送异常: {str(e)}", exc_info=True)
+
+# 保持向后兼容的别名
+send_pushplus_message = send_wechat_message
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 async def safe_fetch(method, *args, **kwargs):

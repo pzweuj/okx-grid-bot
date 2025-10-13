@@ -12,7 +12,7 @@
     *   最大仓位比例限制 (`MAX_POSITION_RATIO`)
 *   **Web 用户界面**: 提供一个简单的 Web 界面 (通过 `web_server.py`)，用于实时监控交易状态、账户信息、订单和调整配置。
 *   **状态持久化**: 将交易状态保存到 `data/` 目录下的 JSON 文件中，以便重启后恢复。
-*   **通知推送**: 可通过 PushPlus 发送重要事件和错误通知 (`PUSHPLUS_TOKEN`)。
+*   **通知推送**: 可通过企业微信机器人发送重要事件和错误通知 (`WECHAT_WEBHOOK_KEY`)。
 *   **日志记录**: 详细的运行日志记录在 `trading_system.log` 文件中。
 
 ## 环境要求
@@ -24,7 +24,7 @@
     *   内存：512MB 及以上（推荐1GB或2GB）
     *   硬盘：500MB 可用空间
     *   操作系统：Windows、Linux 或 macOS
-    *   网络：需能访问OKX API和PushPlus（如启用通知）
+    *   网络：需能访问OKX API和企业微信（如启用通知）
     *   网络建议：建议选择延迟低的网络，如日本等地区。
 
 ## 安装步骤
@@ -65,8 +65,8 @@
     OKX_SECRET_KEY=YOUR_OKX_SECRET_KEY
     OKX_PASSPHRASE=YOUR_OKX_PASSPHRASE
 
-    # PushPlus Token (可选, 用于消息推送)
-    PUSHPLUS_TOKEN=YOUR_PUSHPLUS_TOKEN
+    # 企业微信机器人 Webhook Key (可选, 用于消息推送)
+    WECHAT_WEBHOOK_KEY=YOUR_WECHAT_WEBHOOK_KEY
 
     # 初始设置 (可选, 影响首次运行和统计)
     # 如不设置，INITIAL_PRINCIPAL 和 INITIAL_BASE_PRICE 默认为 0
