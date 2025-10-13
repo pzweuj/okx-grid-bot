@@ -1248,10 +1248,15 @@ class GridTrader:
             available_usdt = usdt_balance + funding_usdt
             
             if available_usdt > target_usdt:
-                # 多余的申购到理财
-                transfer_amount = usdt_balance - target_usdt  # 只从现货转出
-                if transfer_amount > 0 and transfer_amount >= 1.0:  # 通常USDT划转的最小额度是1.0
-                    self.logger.info(f"发现可划转USDT: {transfer_amount}")
+                # 多余的申购到理财（优先从现货转出）
+                excess_amount = available_usdt - target_usdt
+                # 计算实际可从现货转出的金额（不能让现货变成负数）
+                # 预留0.1 USDT作为安全缓冲，避免余额不足
+                safe_spot_balance = max(0, usdt_balance - 0.1)
+                transfer_amount = min(safe_spot_balance, excess_amount)
+                
+                if transfer_amount >= 1.0:  # 通常USDT划转的最小额度是1.0
+                    self.logger.info(f"发现可划转USDT: {transfer_amount:.2f} (现货: {usdt_balance:.2f}, 资金账户: {funding_usdt:.2f}, 超出: {excess_amount:.2f})")
                     try:
                         await self.exchange.transfer_to_savings('USDT', transfer_amount)
                         self.logger.info(f"已将 {transfer_amount:.2f} USDT 申购到理财")
@@ -1283,10 +1288,15 @@ class GridTrader:
             available_okb = coin_balance + funding_okb
             
             if available_okb > target_okb:
-                # 多余的申购到理财
-                transfer_amount = coin_balance - target_okb  # 只从现货转出
-                if transfer_amount > 0 and transfer_amount >= 0.01:
-                    self.logger.info(f"发现可划转{self.symbol_info['base']}: {transfer_amount}")
+                # 多余的申购到理财（优先从现货转出）
+                excess_amount = available_okb - target_okb
+                # 计算实际可从现货转出的金额（不能让现货变成负数）
+                # 预留0.0001作为安全缓冲，避免余额不足
+                safe_spot_balance = max(0, coin_balance - 0.0001)
+                transfer_amount = min(safe_spot_balance, excess_amount)
+                
+                if transfer_amount >= 0.01:
+                    self.logger.info(f"发现可划转{self.symbol_info['base']}: {transfer_amount:.4f} (现货: {coin_balance:.4f}, 资金账户: {funding_okb:.4f}, 超出: {excess_amount:.4f})")
                     try:
                         await self.exchange.transfer_to_savings(self.symbol_info['base'], transfer_amount)
                         self.logger.info(f"已将 {transfer_amount:.4f} {self.symbol_info['base']} 申购到理财")
