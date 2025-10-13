@@ -125,21 +125,28 @@ class GridTrader:
                     # 转换格式以匹配 OrderTracker 期望的格式 (如果需要)
                     formatted_trades = []
                     for trade in latest_trades['data']:
-                        # 注意: ccxt 返回的 trade 结构可能需要调整
-                        # 假设 OrderTracker 需要 timestamp(秒), side, price, amount, profit, order_id
-                        # profit 可能需要后续计算或默认为0
-                        formatted_trade = {
-                            'timestamp': int(trade['uTime']) / 1000, # ms to s
-                            'side': trade['side'],
-                            'price': float(trade['fillPx']),
-                            'amount': float(trade['sz']),
-                            'cost': float(trade['fillSz']) * float(trade['fillPx']), # 保留原始 cost
-                            # 'fee': trade.get('fee', {}).get('cost', 0), # 提取手续费
-                            'fee': 0, # 提取手续费
-                            'order_id': trade.get('ordId'), # 关联订单ID
-                            'profit': 0 # 初始化时设为0，或者后续计算
-                        }
-                        formatted_trades.append(formatted_trade)
+                        # 跳过未成交或部分成交的订单（fillPx为空）
+                        if not trade.get('fillPx') or trade['fillPx'] == '':
+                            continue
+                        
+                        try:
+                            # 注意: ccxt 返回的 trade 结构可能需要调整
+                            # 假设 OrderTracker 需要 timestamp(秒), side, price, amount, profit, order_id
+                            # profit 可能需要后续计算或默认为0
+                            formatted_trade = {
+                                'timestamp': int(trade['uTime']) / 1000, # ms to s
+                                'side': trade['side'],
+                                'price': float(trade['fillPx']),
+                                'amount': float(trade['sz']),
+                                'cost': float(trade['fillSz']) * float(trade['fillPx']), # 保留原始 cost
+                                # 'fee': trade.get('fee', {}).get('cost', 0), # 提取手续费
+                                'fee': 0, # 提取手续费
+                                'order_id': trade.get('ordId'), # 关联订单ID
+                                'profit': 0 # 初始化时设为0，或者后续计算
+                            }
+                            formatted_trades.append(formatted_trade)
+                        except (ValueError, KeyError) as e:
+                            self.logger.warning(f"跳过无效交易记录: {e}")
                     
                     # 直接替换 OrderTracker 中的历史记录
                     self.order_tracker.trade_history = formatted_trades

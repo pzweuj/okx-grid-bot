@@ -180,13 +180,19 @@ class ExchangeClient:
         """获取简单赚币（Savings）余额"""
         try:
             result = await asyncio.to_thread(self.savings_api.get_saving_balance)
+            self.logger.debug(f"Savings API响应: {result}")
+            
             if result['code'] == '0':
                 balances = {"USDT": 0.0, BASE_CURRENCY: 0.0}
-                for item in result['data']:
-                    asset = item['ccy']
-                    # amt是总金额，包含本金和收益
-                    amount = float(item.get('amt', 0))
-                    balances[asset] = amount
+                if result['data']:
+                    for item in result['data']:
+                        asset = item['ccy']
+                        # amt是总金额，包含本金和收益
+                        amount = float(item.get('amt', 0))
+                        balances[asset] = amount
+                        self.logger.debug(f"简单赚币余额: {asset} = {amount}")
+                else:
+                    self.logger.warning("简单赚币API返回空数据")
                 return balances
             else:
                 error_msg = f"获取Savings余额失败: {result['msg']} | 错误码: {result['code']}"
