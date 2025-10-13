@@ -388,6 +388,30 @@ class ExchangeClient:
             
             # 步骤1: 从简单赚币赎回到资金账户
             self.logger.info(f"步骤1: 从简单赚币赎回 {formatted_amount} {asset} 到资金账户")
+            
+            # 先查询当前简单赚币余额
+            savings_balance = await self.fetch_savings_balance()
+            current_savings = savings_balance.get(asset, 0)
+            self.logger.info(f"当前简单赚币{asset}余额: {current_savings:.8f}, 尝试赎回: {formatted_amount}")
+            
+            # 如果余额不足，调整赎回金额或跳过
+            if current_savings <= 0:
+                self.logger.warning(f"简单赚币中没有{asset}，跳过赎回")
+                return {'code': '0', 'msg': 'No balance to redeem', 'data': []}
+            
+            # 检查最小赎回金额（USDT最小1，其他币种最小0.001）
+            min_redeem_amount = 1.0 if asset == 'USDT' else 0.001
+            if current_savings < min_redeem_amount:
+                self.logger.warning(f"简单赚币{asset}余额({current_savings:.8f})低于最小赎回金额({min_redeem_amount})，跳过赎回")
+                return {'code': '0', 'msg': 'Balance below minimum redemption amount', 'data': []}
+            
+            if float(formatted_amount) > current_savings:
+                self.logger.warning(f"赎回金额超过余额，调整为全部赎回: {current_savings:.8f}")
+                if asset == 'USDT':
+                    formatted_amount = "{:.2f}".format(current_savings)
+                else:
+                    formatted_amount = "{:.8f}".format(current_savings)
+            
             params = {
                 'ccy': asset,
                 'amt': formatted_amount,
@@ -408,14 +432,15 @@ class ExchangeClient:
             
             # 步骤2: 从资金账户转到现货账户
             self.logger.info(f"步骤2: 将 {formatted_amount} {asset} 从资金账户转到现货")
-            transfer_params = {
-                'ccy': asset,
-                'amt': formatted_amount,
-                'from': '6',   # 6 = 资金账户
-                'to': '18',    # 18 = 现货账户
-                'type': '0'    # 0 = 账户内划转
-            }
-            transfer_result = await asyncio.to_thread(self.funding_api.funds_transfer, **transfer_params)
+            # 注意：OKX SDK使用 from_ 代替 from（避免Python关键字冲突）
+            transfer_result = await asyncio.to_thread(
+                self.funding_api.funds_transfer,
+                ccy=asset,
+                amt=formatted_amount,
+                from_='6',  # 6 = 资金账户
+                to='18',    # 18 = 现货账户
+                type='0'    # 0 = 账户内划转
+            )
             
             if transfer_result['code'] != '0':
                 error_msg = f"资金账户转现货失败: {transfer_result['msg']} | 错误码: {transfer_result['code']}"
@@ -447,14 +472,15 @@ class ExchangeClient:
             
             # 步骤1: 从现货账户转到资金账户
             self.logger.info(f"步骤1: 将 {formatted_amount} {asset} 从现货转到资金账户")
-            transfer_params = {
-                'ccy': asset,
-                'amt': formatted_amount,
-                'from': '18',  # 18 = 现货账户
-                'to': '6',     # 6 = 资金账户
-                'type': '0'    # 0 = 账户内划转
-            }
-            transfer_result = await asyncio.to_thread(self.funding_api.funds_transfer, **transfer_params)
+            # 注意：OKX SDK使用 from_ 代替 from（避免Python关键字冲突）
+            transfer_result = await asyncio.to_thread(
+                self.funding_api.funds_transfer,
+                ccy=asset,
+                amt=formatted_amount,
+                from_='18',  # 18 = 现货账户
+                to='6',      # 6 = 资金账户
+                type='0'     # 0 = 账户内划转
+            )
             
             if transfer_result['code'] != '0':
                 error_msg = f"现货转资金账户失败: {transfer_result['msg']} | 错误码: {transfer_result['code']}"
@@ -468,17 +494,35 @@ class ExchangeClient:
             
             # 步骤2: 从资金账户申购到简单赚币
             self.logger.info(f"步骤2: 将 {formatted_amount} {asset} 申购到简单赚币")
+            
+            # 检查最小申购金额（USDT最小1，其他币种最小0.001）
+            min_purchase_amount = 1.0 if asset == 'USDT' else 0.001
+            if float(formatted_amount) < min_purchase_amount:
+                self.logger.warning(f"申购金额({formatted_amount})低于最小申购金额({min_purchase_amount})，跳过申购")
+                return {'code': '0', 'msg': 'Amount below minimum purchase amount', 'data': []}
+            
+            # 检查资金账户余额
+            funding_balance = await self.fetch_funding_balance()
+            funding_amount = funding_balance.get(asset, 0)
+            self.logger.info(f"资金账户{asset}余额: {funding_amount:.8f}")
+            
             params = {
                 'ccy': asset,
                 'amt': formatted_amount,
                 'side': 'purchase',
                 'rate': '0.01',  # 年化利率1%（小数格式：0.01 = 1%），根据实际需求调整
             }
+            self.logger.info(f"申购参数: {params}")
             result = await asyncio.to_thread(self.savings_api.savings_purchase_redemption, **params)
+            self.logger.info(f"申购API响应: {result}")
             
             if result['code'] != '0':
                 error_msg = f"申购简单赚币失败: {result['msg']} | 错误码: {result['code']}"
                 self.logger.error(error_msg)
+                # 如果是余额不足或不支持的币种，不抛出异常，只记录警告
+                if result['code'] in ['58350', '58351']:
+                    self.logger.warning(f"{asset}可能不支持简单赚币或余额不足，跳过申购")
+                    return result
                 raise Exception(error_msg)
             
             self.logger.info(f"申购成功: {result}")
