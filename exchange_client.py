@@ -376,7 +376,7 @@ class ExchangeClient:
             self.logger.error(error_msg)
 
     async def transfer_to_spot(self, asset, amount):
-        """从活期理财赎回到现货账户"""
+        """从活期理财赎回到现货账户（需要经过资金账户）"""
         try:
             # 格式化金额，确保精度正确
             if asset == 'USDT':
@@ -385,15 +385,44 @@ class ExchangeClient:
                 formatted_amount = "{:.8f}".format(float(amount))
             else:
                 formatted_amount = str(amount)
+            
+            # 步骤1: 从简单赚币赎回到资金账户
+            self.logger.info(f"步骤1: 从简单赚币赎回 {formatted_amount} {asset} 到资金账户")
             params = {
                 'ccy': asset,
                 'amt': formatted_amount,
                 'side': 'redempt',
                 'rate': '0.01'
             }
-            self.logger.info(f"开始赎回: {formatted_amount} {asset} 到现货")
             result = await asyncio.to_thread(self.savings_api.savings_purchase_redemption, **params)
-            self.logger.info(f"划转成功: {result}")
+            
+            if result['code'] != '0':
+                error_msg = f"赎回简单赚币失败: {result['msg']} | 错误码: {result['code']}"
+                self.logger.error(error_msg)
+                raise Exception(error_msg)
+            
+            self.logger.info(f"简单赚币→资金账户赎回成功")
+            
+            # 等待资金到账
+            await asyncio.sleep(1)
+            
+            # 步骤2: 从资金账户转到现货账户
+            self.logger.info(f"步骤2: 将 {formatted_amount} {asset} 从资金账户转到现货")
+            transfer_params = {
+                'ccy': asset,
+                'amt': formatted_amount,
+                'from': '6',   # 6 = 资金账户
+                'to': '18',    # 18 = 现货账户
+                'type': '0'    # 0 = 账户内划转
+            }
+            transfer_result = await asyncio.to_thread(self.funding_api.funds_transfer, **transfer_params)
+            
+            if transfer_result['code'] != '0':
+                error_msg = f"资金账户转现货失败: {transfer_result['msg']} | 错误码: {transfer_result['code']}"
+                self.logger.error(error_msg)
+                raise Exception(error_msg)
+            
+            self.logger.info(f"资金账户→现货转账成功")
             
             # 赎回后清除余额缓存，确保下次获取最新余额
             self.balance_cache = {'timestamp': 0, 'data': None}
@@ -406,7 +435,7 @@ class ExchangeClient:
             raise Exception(error_msg)
 
     async def transfer_to_savings(self, asset, amount):
-        """从现货账户申购活期理财"""
+        """从现货账户申购活期理财（需要先转到资金账户）"""
         try:
             # 格式化金额，确保精度正确
             if asset == 'USDT':
@@ -416,15 +445,43 @@ class ExchangeClient:
             else:
                 formatted_amount = str(amount)
             
+            # 步骤1: 从现货账户转到资金账户
+            self.logger.info(f"步骤1: 将 {formatted_amount} {asset} 从现货转到资金账户")
+            transfer_params = {
+                'ccy': asset,
+                'amt': formatted_amount,
+                'from': '18',  # 18 = 现货账户
+                'to': '6',     # 6 = 资金账户
+                'type': '0'    # 0 = 账户内划转
+            }
+            transfer_result = await asyncio.to_thread(self.funding_api.funds_transfer, **transfer_params)
+            
+            if transfer_result['code'] != '0':
+                error_msg = f"现货转资金账户失败: {transfer_result['msg']} | 错误码: {transfer_result['code']}"
+                self.logger.error(error_msg)
+                raise Exception(error_msg)
+            
+            self.logger.info(f"现货→资金账户转账成功")
+            
+            # 等待资金到账
+            await asyncio.sleep(1)
+            
+            # 步骤2: 从资金账户申购到简单赚币
+            self.logger.info(f"步骤2: 将 {formatted_amount} {asset} 申购到简单赚币")
             params = {
                 'ccy': asset,
                 'amt': formatted_amount,
                 'side': 'purchase',
                 'rate': '0.01',  # 年化利率1%（小数格式：0.01 = 1%），根据实际需求调整
             }
-            self.logger.info(f"开始申购: {formatted_amount} {asset} 到活期理财")
             result = await asyncio.to_thread(self.savings_api.savings_purchase_redemption, **params)
-            self.logger.info(f"划转成功: {result}")
+            
+            if result['code'] != '0':
+                error_msg = f"申购简单赚币失败: {result['msg']} | 错误码: {result['code']}"
+                self.logger.error(error_msg)
+                raise Exception(error_msg)
+            
+            self.logger.info(f"申购成功: {result}")
             
             # 申购后清除余额缓存，确保下次获取最新余额
             self.balance_cache = {'timestamp': 0, 'data': None}

@@ -1306,6 +1306,7 @@ class GridTrader:
             
             balance = await self.exchange.fetch_balance()
             funding_balance = await self.exchange.fetch_funding_balance()
+            savings_balance = await self.exchange.fetch_savings_balance()
             current_price = await self._get_latest_price()
             
             # 防御性检查：确保返回的价格是有效的
@@ -1326,18 +1327,26 @@ class GridTrader:
             spot_okb += float(balance.get('used', {}).get(self.symbol_info['base'], 0) or 0)
             spot_usdt += float(balance.get('used', {}).get('USDT', 0) or 0)
             
-            # 加上理财账户余额
+            # 加上资金账户余额
             fund_okb = 0
             fund_usdt = 0
             if funding_balance:
                 fund_okb = float(funding_balance.get(self.symbol_info['base'], 0) or 0)
                 fund_usdt = float(funding_balance.get('USDT', 0) or 0)
             
+            # 加上简单赚币余额
+            savings_okb = 0
+            savings_usdt = 0
+            if savings_balance:
+                savings_okb = float(savings_balance.get(self.symbol_info['base'], 0) or 0)
+                savings_usdt = float(savings_balance.get('USDT', 0) or 0)
             
-            # 分别计算现货和理财账户总值
+            
+            # 分别计算现货、资金账户和简单赚币总值
             spot_value = spot_usdt + (spot_okb * current_price)
             fund_value = fund_usdt + (fund_okb * current_price)
-            total_assets = spot_value + fund_value
+            savings_value = savings_usdt + (savings_okb * current_price)
+            total_assets = spot_value + fund_value + savings_value
             
             # 更新缓存
             self._assets_cache = {
@@ -1352,8 +1361,10 @@ class GridTrader:
                     f"总资产: {total_assets:.2f} USDT | "
                     f"现货: {spot_value:.2f} USDT "
                     f"({self.symbol_info['base']}: {spot_okb:.4f}, USDT: {spot_usdt:.2f}) | "
-                    f"理财: {fund_value:.2f} USDT "
-                    f"({self.symbol_info['base']}: {fund_okb:.4f}, USDT: {fund_usdt:.2f})"
+                    f"资金账户: {fund_value:.2f} USDT "
+                    f"({self.symbol_info['base']}: {fund_okb:.4f}, USDT: {fund_usdt:.2f}) | "
+                    f"简单赚币: {savings_value:.2f} USDT "
+                    f"({self.symbol_info['base']}: {savings_okb:.4f}, USDT: {savings_usdt:.2f})"
                 )
                 self._last_logged_assets = total_assets
             
