@@ -9,7 +9,7 @@ QUOTE_SYMBOL = 'USDT'  # 计价币种
 SYMBOL = f"{BASE_SYMBOL}-{QUOTE_SYMBOL}"  # OKX使用-而不是/作为分隔符
 BASE_CURRENCY = BASE_SYMBOL
 
-FLAG = '1'  # 0为实盘，1为模拟
+FLAG = '0'  # 0为实盘，1为模拟
 
 INITIAL_GRID = 2.0
 FLIP_THRESHOLD = lambda grid_size: (grid_size / 5) / 100  # 网格大小的1/5的1%
@@ -23,7 +23,7 @@ MAX_DRAWDOWN = -0.15
 DAILY_LOSS_LIMIT = -0.05
 MAX_POSITION_RATIO = 0.9  # 最大仓位比例 (90%)，保留10%底仓
 MIN_POSITION_RATIO = 0.1  # 最小仓位比例 (10%)，底仓
-PUSHPLUS_TOKEN = os.getenv('PUSHPLUS_TOKEN')
+WECHAT_WEBHOOK_KEY = os.getenv('WECHAT_WEBHOOK_KEY')
 LOG_LEVEL = logging.INFO  # 设置为INFO减少调试日志
 DEBUG_MODE = False  # 设置为True时显示详细日志
 API_TIMEOUT = 10000  # API超时时间（毫秒）
