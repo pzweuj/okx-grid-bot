@@ -1511,17 +1511,19 @@ class GridTrader:
                 return True
                 
             # 现货不足，尝试从理财赎回
-            self.logger.info(f"现货USDT不足，尝试从理财赎回...")
-            funding_balance = await self.exchange.fetch_funding_balance()
-            funding_usdt = float(funding_balance.get('USDT', 0) or 0)
+            self.logger.info(f"现货USDT不足，尝试从简单赚币赎回...")
+            savings_balance = await self.exchange.fetch_savings_balance()
+            savings_usdt = float(savings_balance.get('USDT', 0) or 0)
+            
+            self.logger.info(f"简单赚币USDT余额: {savings_usdt:.2f}")
             
             # 检查总余额是否足够
-            if spot_usdt + funding_usdt < amount_usdt:
+            if spot_usdt + savings_usdt < amount_usdt:
                 # 总资金不足，发送通知
                 error_msg = f"资金不足通知\\n交易类型: 买入\\n所需USDT: {amount_usdt:.2f}\\n" \
-                           f"现货余额: {spot_usdt:.2f}\\n理财余额: {funding_usdt:.2f}\\n" \
-                           f"缺口: {amount_usdt - (spot_usdt + funding_usdt):.2f}"
-                self.logger.error(f"买入资金不足: 现货+理财总额不足以执行交易")
+                           f"现货余额: {spot_usdt:.2f}\\n简单赚币余额: {savings_usdt:.2f}\\n" \
+                           f"缺口: {amount_usdt - (spot_usdt + savings_usdt):.2f}"
+                self.logger.error(f"买入资金不足: 现货+简单赚币总额不足以执行交易")
                 send_pushplus_message(error_msg, "资金不足警告")
                 return False
                 
@@ -1583,33 +1585,35 @@ class GridTrader:
                 self.logger.info(f"现货{self.symbol_info['base']}余额充足，可以卖出")
                 return True
             else:
-                # 余额不足，检查理财账户
-                self.logger.info(f"现货{self.symbol_info['base']}不足，尝试从理财赎回...")
-                funding_balance = await self.exchange.fetch_funding_balance()
-                funding_okb = float(funding_balance.get(self.symbol_info['base'], 0) or 0)
+                # 余额不足，检查简单赚币账户
+                self.logger.info(f"现货{self.symbol_info['base']}不足，尝试从简单赚币赎回...")
+                savings_balance = await self.exchange.fetch_savings_balance()
+                savings_okb = float(savings_balance.get(self.symbol_info['base'], 0) or 0)
                 
-                if funding_okb <= 0:
-                    self.logger.warning(f"理财{self.symbol_info['base']}余额为0，无法补充")
+                self.logger.info(f"简单赚币{self.symbol_info['base']}余额: {savings_okb:.8f}")
+                
+                if savings_okb <= 0:
+                    self.logger.warning(f"简单赚币{self.symbol_info['base']}余额为0，无法补充")
                     
                     # 发送资金不足通知
                     error_msg = f"资金不足通知\\n交易类型: 卖出\\n所需{self.symbol_info['base']}: {coin_needed:.8f}\\n" \
-                               f"现货余额: {spot_okb:.8f}\\n理财余额: {funding_okb:.8f}"
+                               f"现货余额: {spot_okb:.8f}\\n简单赚币余额: {savings_okb:.8f}"
                     send_pushplus_message(error_msg, "余额不足")
                     return False
                 
-                # 计算需要从理财赎回的数量，考虑手续费和划转最低限额
+                # 计算需要从简单赚币赎回的数量，考虑手续费和划转最低限额
                 needed_amount = min(
                     coin_needed - spot_okb,  # 实际需要的差额
-                    funding_okb  # 不能超过理财账户可用余额
+                    savings_okb  # 不能超过简单赚币账户可用余额
                 )
                 
                 if needed_amount <= 0:
                     self.logger.warning(f"赎回计算错误: {needed_amount}")
                     return False
                 
-                # 尝试从理财账户赎回
+                # 尝试从简单赚币赎回
                 try:
-                    self.logger.info(f"从理财赎回 {needed_amount:.8f} {self.symbol_info['base']}")
+                    self.logger.info(f"从简单赚币赎回 {needed_amount:.8f} {self.symbol_info['base']}")
                     await self.exchange.transfer_to_spot(self.symbol_info['base'], needed_amount)
                     
                     # 等待短暂时间让划转生效
@@ -1629,7 +1633,7 @@ class GridTrader:
                         send_pushplus_message(error_msg, "余额不足")
                         return False
                 except Exception as e:
-                    self.logger.error(f"从理财赎回{self.symbol_info['base']}失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")
+                    self.logger.error(f"从简单赚币赎回{self.symbol_info['base']}失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")
                     return False
         except Exception as e:
             self.logger.error(f"检查卖出余额失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")

@@ -147,7 +147,7 @@ class ExchangeClient:
             raise Exception(error_msg)
     
     async def fetch_funding_balance(self):
-        """获取理财账户余额（含缓存机制）"""
+        """获取资金账户余额（含缓存机制）"""
         now = time.time()
         if now - self.funding_balance_cache['timestamp'] < self.cache_ttl:
             return self.funding_balance_cache['data']
@@ -168,13 +168,34 @@ class ExchangeClient:
                 }
                 return balances
             else:
-                error_msg = f"获取理财账户余额失败: {result['msg']} | 错误码: {result['code']}"
+                error_msg = f"获取资金账户余额失败: {result['msg']} | 错误码: {result['code']}"
                 self.logger.error(error_msg)
                 raise Exception(error_msg)
         except Exception as e:
-            error_msg = f"获取理财账户余额失败: {str(e)} | 堆栈信息: {traceback.format_exc()}"
+            error_msg = f"获取资金账户余额失败: {str(e)} | 堆栈信息: {traceback.format_exc()}"
             self.logger.error(error_msg)
             return self.funding_balance_cache['data'] if self.funding_balance_cache['data'] else {}
+    
+    async def fetch_savings_balance(self):
+        """获取简单赚币（Savings）余额"""
+        try:
+            result = await asyncio.to_thread(self.savings_api.get_saving_balance)
+            if result['code'] == '0':
+                balances = {"USDT": 0.0, BASE_CURRENCY: 0.0}
+                for item in result['data']:
+                    asset = item['ccy']
+                    # amt是总金额，包含本金和收益
+                    amount = float(item.get('amt', 0))
+                    balances[asset] = amount
+                return balances
+            else:
+                error_msg = f"获取Savings余额失败: {result['msg']} | 错误码: {result['code']}"
+                self.logger.error(error_msg)
+                return {"USDT": 0.0, BASE_CURRENCY: 0.0}
+        except Exception as e:
+            error_msg = f"获取Savings余额失败: {str(e)} | 堆栈信息: {traceback.format_exc()}"
+            self.logger.error(error_msg)
+            return {"USDT": 0.0, BASE_CURRENCY: 0.0}
 
     async def fetch_balance(self, params=None):
         """获取账户余额（含缓存机制）"""
@@ -198,10 +219,20 @@ class ExchangeClient:
                     balance['used'][asset] = used
                     balance['total'][asset] = total
                 
-                # 获取理财账户余额
+                # 获取资金账户余额
                 funding_balance = await self.fetch_funding_balance()
-                # 合并现货和理财余额
+                # 获取简单赚币余额
+                savings_balance = await self.fetch_savings_balance()
+                
+                # 合并现货、资金账户和简单赚币余额
                 for asset, amount in funding_balance.items():
+                    if asset not in balance['total']:
+                        balance['total'][asset] = 0
+                    if asset not in balance['free']:
+                        balance['free'][asset] = 0
+                    balance['total'][asset] += amount
+                
+                for asset, amount in savings_balance.items():
                     if asset not in balance['total']:
                         balance['total'][asset] = 0
                     if asset not in balance['free']:
@@ -352,7 +383,7 @@ class ExchangeClient:
                 'ccy': asset,
                 'amt': formatted_amount,
                 'side': 'redempt',
-                'rate': '0.03'
+                'rate': '0.01'
             }
             self.logger.info(f"开始赎回: {formatted_amount} {asset} 到现货")
             result = await asyncio.to_thread(self.savings_api.savings_purchase_redemption, **params)
@@ -383,6 +414,7 @@ class ExchangeClient:
                 'ccy': asset,
                 'amt': formatted_amount,
                 'side': 'purchase',
+                'rate': '0.01',  # 年化利率1%（小数格式：0.01 = 1%），根据实际需求调整
             }
             self.logger.info(f"开始申购: {formatted_amount} {asset} 到活期理财")
             result = await asyncio.to_thread(self.savings_api.savings_purchase_redemption, **params)
