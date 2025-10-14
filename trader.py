@@ -61,6 +61,8 @@ class GridTrader:
         self.funding_cache_ttl = 60  # 理财余额缓存60秒
         self.position_controller_s1 = PositionControllerS1(self)
         self.buying_or_selling = False #不在等待买入或卖出
+        self.last_funding_transfer_check = 0  # 上次资金账户转账检查时间
+        self.funding_transfer_interval = 300  # 每5分钟检查一次资金账户并转账
 
     async def initialize(self):
         if self.initialized:
@@ -343,6 +345,14 @@ class GridTrader:
                     await asyncio.sleep(5)
                     continue
                 self.current_price = current_price
+
+                # 定期检查资金账户并自动转到现货（每5分钟）
+                if time.time() - self.last_funding_transfer_check > self.funding_transfer_interval:
+                    try:
+                        await self._transfer_funding_to_spot()
+                        self.last_funding_transfer_check = time.time()
+                    except Exception as e:
+                        self.logger.warning(f"资金账户自动转账失败: {str(e)}")
 
                 # 优先检查买入卖出信号，不执行风控检查
                 # 添加重试机制确保买入卖出检测正常运行
@@ -1213,6 +1223,60 @@ class GridTrader:
             )
         )
 
+    async def _transfer_funding_to_spot(self):
+        """将资金账户余额自动转到现货账户（定期执行）"""
+        try:
+            funding_balance = await self.exchange.fetch_funding_balance()
+            funding_usdt = float(funding_balance.get('USDT', 0))
+            funding_okb = float(funding_balance.get(self.symbol_info['base'], 0))
+            
+            # 转移USDT
+            if funding_usdt >= 0.01:  # 最小转账金额
+                self.logger.info(f"检测到资金账户USDT: {funding_usdt:.2f}，自动转到现货")
+                try:
+                    transfer_result = await asyncio.to_thread(
+                        self.exchange.funding_api.funds_transfer,
+                        ccy='USDT',
+                        amt="{:.2f}".format(funding_usdt),
+                        from_='6',  # 6 = 资金账户
+                        to='18',    # 18 = 现货账户
+                        type='0'    # 0 = 账户内划转
+                    )
+                    if transfer_result['code'] == '0':
+                        self.logger.info(f"✓ 资金账户→现货: {funding_usdt:.2f} USDT")
+                        # 清除缓存
+                        self.exchange.balance_cache = {'timestamp': 0, 'data': None}
+                        self.exchange.funding_balance_cache = {'timestamp': 0, 'data': {}}
+                    else:
+                        self.logger.warning(f"资金账户USDT转账失败: {transfer_result['msg']}")
+                except Exception as e:
+                    self.logger.warning(f"资金账户USDT转账异常: {str(e)}")
+            
+            # 转移基础币种
+            if funding_okb >= 0.001:  # 最小转账金额
+                self.logger.info(f"检测到资金账户{self.symbol_info['base']}: {funding_okb:.8f}，自动转到现货")
+                try:
+                    transfer_result = await asyncio.to_thread(
+                        self.exchange.funding_api.funds_transfer,
+                        ccy=self.symbol_info['base'],
+                        amt="{:.8f}".format(funding_okb),
+                        from_='6',  # 6 = 资金账户
+                        to='18',    # 18 = 现货账户
+                        type='0'    # 0 = 账户内划转
+                    )
+                    if transfer_result['code'] == '0':
+                        self.logger.info(f"✓ 资金账户→现货: {funding_okb:.8f} {self.symbol_info['base']}")
+                        # 清除缓存
+                        self.exchange.balance_cache = {'timestamp': 0, 'data': None}
+                        self.exchange.funding_balance_cache = {'timestamp': 0, 'data': {}}
+                    else:
+                        self.logger.warning(f"资金账户{self.symbol_info['base']}转账失败: {transfer_result['msg']}")
+                except Exception as e:
+                    self.logger.warning(f"资金账户{self.symbol_info['base']}转账异常: {str(e)}")
+                    
+        except Exception as e:
+            self.logger.error(f"检查资金账户余额失败: {str(e)}")
+
     async def _check_and_transfer_initial_funds(self):
         """检查初始资金分配并执行必要的划转"""
         try:
@@ -1238,6 +1302,60 @@ class GridTrader:
             # 获取简单赚币余额
             savings_usdt = float(savings_balance.get('USDT', 0) or 0)
             savings_okb = float(savings_balance.get(self.symbol_info['base'], 0) or 0)
+            
+            # ========== 新增：先将资金账户余额转到现货账户 ==========
+            # 转移USDT
+            if funding_usdt >= 0.01:  # 最小转账金额
+                self.logger.info(f"发现资金账户USDT余额: {funding_usdt:.2f}，自动转到现货账户")
+                try:
+                    transfer_result = await asyncio.to_thread(
+                        self.exchange.funding_api.funds_transfer,
+                        ccy='USDT',
+                        amt="{:.2f}".format(funding_usdt),
+                        from_='6',  # 6 = 资金账户
+                        to='18',    # 18 = 现货账户
+                        type='0'    # 0 = 账户内划转
+                    )
+                    if transfer_result['code'] == '0':
+                        self.logger.info(f"资金账户→现货: {funding_usdt:.2f} USDT 转账成功")
+                        usdt_balance += funding_usdt  # 更新现货余额
+                        funding_usdt = 0  # 资金账户清零
+                        # 清除缓存
+                        self.exchange.balance_cache = {'timestamp': 0, 'data': None}
+                        self.exchange.funding_balance_cache = {'timestamp': 0, 'data': {}}
+                    else:
+                        self.logger.warning(f"资金账户USDT转账失败: {transfer_result['msg']}")
+                except Exception as e:
+                    self.logger.warning(f"资金账户USDT转账异常: {str(e)}")
+            
+            # 转移基础币种
+            if funding_okb >= 0.001:  # 最小转账金额
+                self.logger.info(f"发现资金账户{self.symbol_info['base']}余额: {funding_okb:.8f}，自动转到现货账户")
+                try:
+                    transfer_result = await asyncio.to_thread(
+                        self.exchange.funding_api.funds_transfer,
+                        ccy=self.symbol_info['base'],
+                        amt="{:.8f}".format(funding_okb),
+                        from_='6',  # 6 = 资金账户
+                        to='18',    # 18 = 现货账户
+                        type='0'    # 0 = 账户内划转
+                    )
+                    if transfer_result['code'] == '0':
+                        self.logger.info(f"资金账户→现货: {funding_okb:.8f} {self.symbol_info['base']} 转账成功")
+                        coin_balance += funding_okb  # 更新现货余额
+                        funding_okb = 0  # 资金账户清零
+                        # 清除缓存
+                        self.exchange.balance_cache = {'timestamp': 0, 'data': None}
+                        self.exchange.funding_balance_cache = {'timestamp': 0, 'data': {}}
+                    else:
+                        self.logger.warning(f"资金账户{self.symbol_info['base']}转账失败: {transfer_result['msg']}")
+                except Exception as e:
+                    self.logger.warning(f"资金账户{self.symbol_info['base']}转账异常: {str(e)}")
+            
+            # 等待转账完成
+            if funding_usdt >= 0.01 or funding_okb >= 0.001:
+                await asyncio.sleep(1)
+            # ========== 资金账户转移完成 ==========
             
             # 计算总余额（现货+资金账户+简单赚币）
             total_usdt = usdt_balance + funding_usdt + savings_usdt
