@@ -1546,7 +1546,7 @@ class GridTrader:
         return ema
     
     async def check_buy_balance(self, current_price):
-        """检查买入前的余额，如果不够则从理财赎回"""
+        """检查买入前的余额，如果不够则从资金账户或理财赎回"""
         try:
             # 计算所需买入资金
             amount_usdt = await self._calculate_order_amount('buy')
@@ -1567,20 +1567,70 @@ class GridTrader:
             if spot_usdt >= amount_usdt:
                 return True
                 
-            # 现货不足，尝试从理财赎回
-            self.logger.info(f"现货USDT不足，尝试从简单赚币赎回...")
+            # 现货不足，先检查资金账户
+            self.logger.info(f"现货USDT不足，检查资金账户...")
+            funding_balance = await self.exchange.fetch_funding_balance()
+            funding_usdt = float(funding_balance.get('USDT', 0) or 0)
+            
+            self.logger.info(f"资金账户USDT余额: {funding_usdt:.2f}")
+            
+            # 如果资金账户有余额，尝试从资金账户转到现货
+            if funding_usdt > 0:
+                # 计算需要转账的金额（增加5%缓冲，但不超过资金账户余额）
+                needed_from_funding = min((amount_usdt - spot_usdt) * 1.05, funding_usdt)
+                
+                if needed_from_funding >= 0.01:  # 最小转账金额
+                    self.logger.info(f"从资金账户转账 {needed_from_funding:.2f} USDT 到现货账户")
+                    try:
+                        # 使用funding_api直接转账
+                        transfer_result = await asyncio.to_thread(
+                            self.exchange.funding_api.funds_transfer,
+                            ccy='USDT',
+                            amt="{:.2f}".format(needed_from_funding),
+                            from_='6',  # 6 = 资金账户
+                            to='18',    # 18 = 现货账户
+                            type='0'    # 0 = 账户内划转
+                        )
+                        
+                        if transfer_result['code'] == '0':
+                            self.logger.info(f"资金账户→现货转账成功")
+                            # 清除缓存
+                            self.exchange.balance_cache = {'timestamp': 0, 'data': None}
+                            self.exchange.funding_balance_cache = {'timestamp': 0, 'data': {}}
+                            
+                            # 等待资金到账
+                            await asyncio.sleep(2)
+                            
+                            # 再次检查现货余额
+                            new_balance = await self.exchange.fetch_balance({'type': 'spot'})
+                            if new_balance and 'free' in new_balance:
+                                spot_usdt = float(new_balance.get('free', {}).get('USDT', 0) or 0)
+                                self.logger.info(f"转账后现货USDT: {spot_usdt:.2f}")
+                                
+                                # 如果现在余额足够，返回成功
+                                if spot_usdt >= amount_usdt:
+                                    return True
+                        else:
+                            self.logger.warning(f"资金账户转账失败: {transfer_result['msg']}")
+                    except Exception as e:
+                        self.logger.warning(f"资金账户转账异常: {str(e)}")
+            
+            # 如果资金账户转账后仍不足，尝试从简单赚币赎回
+            self.logger.info(f"现货+资金账户仍不足，尝试从简单赚币赎回...")
             savings_balance = await self.exchange.fetch_savings_balance()
             savings_usdt = float(savings_balance.get('USDT', 0) or 0)
             
             self.logger.info(f"简单赚币USDT余额: {savings_usdt:.2f}")
             
             # 检查总余额是否足够
-            if spot_usdt + savings_usdt < amount_usdt:
+            total_available = spot_usdt + savings_usdt
+            if total_available < amount_usdt:
                 # 总资金不足，发送通知
                 error_msg = f"资金不足通知\\n交易类型: 买入\\n所需USDT: {amount_usdt:.2f}\\n" \
-                           f"现货余额: {spot_usdt:.2f}\\n简单赚币余额: {savings_usdt:.2f}\\n" \
-                           f"缺口: {amount_usdt - (spot_usdt + savings_usdt):.2f}"
-                self.logger.error(f"买入资金不足: 现货+简单赚币总额不足以执行交易")
+                           f"现货余额: {spot_usdt:.2f}\\n资金账户余额: {funding_usdt:.2f}\\n" \
+                           f"简单赚币余额: {savings_usdt:.2f}\\n" \
+                           f"缺口: {amount_usdt - total_available:.2f}"
+                self.logger.error(f"买入资金不足: 现货+资金账户+简单赚币总额不足以执行交易")
                 send_pushplus_message(error_msg, "资金不足警告")
                 return False
                 
@@ -1620,7 +1670,7 @@ class GridTrader:
             return False
             
     async def check_sell_balance(self):
-        """检查卖出所需的余额是否足够，如果不足则尝试从理财账户赎回"""
+        """检查卖出所需的余额是否足够，如果不足则尝试从资金账户或理财账户赎回"""
         try:
             # 获取当前价格用于计算币种需求
             current_price = await self._get_latest_price()
@@ -1641,57 +1691,107 @@ class GridTrader:
             if spot_okb >= coin_needed:
                 self.logger.info(f"现货{self.symbol_info['base']}余额充足，可以卖出")
                 return True
-            else:
-                # 余额不足，检查简单赚币账户
-                self.logger.info(f"现货{self.symbol_info['base']}不足，尝试从简单赚币赎回...")
-                savings_balance = await self.exchange.fetch_savings_balance()
-                savings_okb = float(savings_balance.get(self.symbol_info['base'], 0) or 0)
+            
+            # 现货不足，先检查资金账户
+            self.logger.info(f"现货{self.symbol_info['base']}不足，检查资金账户...")
+            funding_balance = await self.exchange.fetch_funding_balance()
+            funding_okb = float(funding_balance.get(self.symbol_info['base'], 0) or 0)
+            
+            self.logger.info(f"资金账户{self.symbol_info['base']}余额: {funding_okb:.8f}")
+            
+            # 如果资金账户有余额，尝试从资金账户转到现货
+            if funding_okb > 0:
+                # 计算需要转账的金额（增加5%缓冲，但不超过资金账户余额）
+                needed_from_funding = min((coin_needed - spot_okb) * 1.05, funding_okb)
                 
-                self.logger.info(f"简单赚币{self.symbol_info['base']}余额: {savings_okb:.8f}")
+                if needed_from_funding >= 0.001:  # 最小转账金额
+                    self.logger.info(f"从资金账户转账 {needed_from_funding:.8f} {self.symbol_info['base']} 到现货账户")
+                    try:
+                        # 使用funding_api直接转账
+                        transfer_result = await asyncio.to_thread(
+                            self.exchange.funding_api.funds_transfer,
+                            ccy=self.symbol_info['base'],
+                            amt="{:.8f}".format(needed_from_funding),
+                            from_='6',  # 6 = 资金账户
+                            to='18',    # 18 = 现货账户
+                            type='0'    # 0 = 账户内划转
+                        )
+                        
+                        if transfer_result['code'] == '0':
+                            self.logger.info(f"资金账户→现货转账成功")
+                            # 清除缓存
+                            self.exchange.balance_cache = {'timestamp': 0, 'data': None}
+                            self.exchange.funding_balance_cache = {'timestamp': 0, 'data': {}}
+                            
+                            # 等待资金到账
+                            await asyncio.sleep(2)
+                            
+                            # 再次检查现货余额
+                            new_balance = await self.exchange.fetch_balance()
+                            if new_balance and 'free' in new_balance:
+                                spot_okb = float(new_balance.get('free', {}).get(self.symbol_info['base'], 0) or 0)
+                                self.logger.info(f"转账后现货{self.symbol_info['base']}: {spot_okb:.8f}")
+                                
+                                # 如果现在余额足够，返回成功
+                                if spot_okb >= coin_needed:
+                                    return True
+                        else:
+                            self.logger.warning(f"资金账户转账失败: {transfer_result['msg']}")
+                    except Exception as e:
+                        self.logger.warning(f"资金账户转账异常: {str(e)}")
+            
+            # 如果资金账户转账后仍不足，检查简单赚币账户
+            self.logger.info(f"现货+资金账户仍不足，尝试从简单赚币赎回...")
+            savings_balance = await self.exchange.fetch_savings_balance()
+            savings_okb = float(savings_balance.get(self.symbol_info['base'], 0) or 0)
+            
+            self.logger.info(f"简单赚币{self.symbol_info['base']}余额: {savings_okb:.8f}")
+            
+            # 检查总余额是否足够
+            total_available = spot_okb + savings_okb
+            if total_available < coin_needed:
+                # 发送资金不足通知
+                error_msg = f"资金不足通知\\n交易类型: 卖出\\n所需{self.symbol_info['base']}: {coin_needed:.8f}\\n" \
+                           f"现货余额: {spot_okb:.8f}\\n资金账户余额: {funding_okb:.8f}\\n" \
+                           f"简单赚币余额: {savings_okb:.8f}\\n" \
+                           f"缺口: {coin_needed - total_available:.8f}"
+                send_pushplus_message(error_msg, "余额不足")
+                return False
+            
+            # 计算需要从简单赚币赎回的数量，考虑手续费和划转最低限额
+            needed_amount = min(
+                coin_needed - spot_okb,  # 实际需要的差额
+                savings_okb  # 不能超过简单赚币账户可用余额
+            )
+            
+            if needed_amount <= 0:
+                self.logger.warning(f"赎回计算错误: {needed_amount}")
+                return False
+            
+            # 尝试从简单赚币赎回
+            try:
+                self.logger.info(f"从简单赚币赎回 {needed_amount:.8f} {self.symbol_info['base']}")
+                await self.exchange.transfer_to_spot(self.symbol_info['base'], needed_amount)
                 
-                if savings_okb <= 0:
-                    self.logger.warning(f"简单赚币{self.symbol_info['base']}余额为0，无法补充")
-                    
-                    # 发送资金不足通知
-                    error_msg = f"资金不足通知\\n交易类型: 卖出\\n所需{self.symbol_info['base']}: {coin_needed:.8f}\\n" \
-                               f"现货余额: {spot_okb:.8f}\\n简单赚币余额: {savings_okb:.8f}"
+                # 等待短暂时间让划转生效
+                await asyncio.sleep(1.5)
+                
+                # 重新检查余额
+                new_balance = await self.exchange.fetch_balance()
+                new_okb = float(new_balance.get('free', {}).get(self.symbol_info['base'], 0) or 0)
+                
+                self.logger.info(f"赎回后余额检查 | 现货{self.symbol_info['base']}: {new_okb:.8f}")
+                
+                if new_okb >= coin_needed:
+                    self.logger.info(f"赎回后{self.symbol_info['base']}余额充足，可以卖出")
+                    return True
+                else:
+                    error_msg = f"资金赎回后仍不足\\n交易类型: 卖出\\n所需{self.symbol_info['base']}: {coin_needed:.8f}\\n现货余额: {new_okb:.8f}"
                     send_pushplus_message(error_msg, "余额不足")
                     return False
-                
-                # 计算需要从简单赚币赎回的数量，考虑手续费和划转最低限额
-                needed_amount = min(
-                    coin_needed - spot_okb,  # 实际需要的差额
-                    savings_okb  # 不能超过简单赚币账户可用余额
-                )
-                
-                if needed_amount <= 0:
-                    self.logger.warning(f"赎回计算错误: {needed_amount}")
-                    return False
-                
-                # 尝试从简单赚币赎回
-                try:
-                    self.logger.info(f"从简单赚币赎回 {needed_amount:.8f} {self.symbol_info['base']}")
-                    await self.exchange.transfer_to_spot(self.symbol_info['base'], needed_amount)
-                    
-                    # 等待短暂时间让划转生效
-                    await asyncio.sleep(1.5)
-                    
-                    # 重新检查余额
-                    new_balance = await self.exchange.fetch_balance()
-                    new_okb = float(new_balance.get('free', {}).get(self.symbol_info['base'], 0) or 0)
-                    
-                    self.logger.info(f"赎回后余额检查 | 现货{self.symbol_info['base']}: {new_okb:.8f}")
-                    
-                    if new_okb >= coin_needed:
-                        self.logger.info(f"赎回后{self.symbol_info['base']}余额充足，可以卖出")
-                        return True
-                    else:
-                        error_msg = f"资金赎回后仍不足\\n交易类型: 卖出\\n所需{self.symbol_info['base']}: {coin_needed:.8f}\\n现货余额: {new_okb:.8f}"
-                        send_pushplus_message(error_msg, "余额不足")
-                        return False
-                except Exception as e:
-                    self.logger.error(f"从简单赚币赎回{self.symbol_info['base']}失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")
-                    return False
+            except Exception as e:
+                self.logger.error(f"从简单赚币赎回{self.symbol_info['base']}失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")
+                return False
         except Exception as e:
             self.logger.error(f"检查卖出余额失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")
             return False
