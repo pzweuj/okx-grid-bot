@@ -145,7 +145,14 @@ class LogConfig:
     LOG_LEVEL = logging.INFO
 
     @staticmethod
-    def setup_logger():
+    def setup_logger(console_output=True):
+        """
+        设置日志系统
+        
+        Args:
+            console_output (bool): 是否输出到控制台，默认True。
+                                   守护进程模式下应设为False
+        """
         logger = logging.getLogger()
         logger.setLevel(LogConfig.LOG_LEVEL)
         
@@ -167,17 +174,17 @@ class LogConfig:
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         file_handler.setFormatter(file_formatter)
-        
-        # 控制台处理器 - 彩色简洁格式
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_formatter = ColoredFormatter(
-            '%(asctime)s | %(levelname)s | %(name)s | %(message)s',
-            datefmt='%H:%M:%S'
-        )
-        console_handler.setFormatter(console_formatter)
-        
         logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
+        
+        # 控制台处理器 - 彩色简洁格式（仅在非守护进程模式下）
+        if console_output:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_formatter = ColoredFormatter(
+                '%(asctime)s | %(levelname)s | %(name)s | %(message)s',
+                datefmt='%H:%M:%S'
+            )
+            console_handler.setFormatter(console_formatter)
+            logger.addHandler(console_handler)
 
     @staticmethod
     def clean_old_logs():
