@@ -1669,36 +1669,39 @@ class GridTrader:
             # 计算所需买入资金
             amount_usdt = await self._calculate_order_amount('buy')
             
-            # 获取现货余额
-            spot_balance = await self.exchange.fetch_balance({'type': 'spot'})
+            # 获取交易账户余额（现货）
+            trading_balance = await self.exchange.fetch_balance()
             
             # 防御性检查：确保返回的余额是有效的
-            if not spot_balance or 'free' not in spot_balance:
-                self.logger.error("获取现货余额失败，返回无效数据")
+            if not trading_balance or 'free' not in trading_balance:
+                self.logger.error("获取交易账户余额失败，返回无效数据")
                 return False
+            
+            # 详细日志：显示完整的余额信息用于诊断
+            self.logger.debug(f"交易账户完整余额: free={trading_balance.get('free')}, total={trading_balance.get('total')}")
                 
-            spot_usdt = float(spot_balance.get('free', {}).get('USDT', 0) or 0)
+            trading_usdt = float(trading_balance.get('free', {}).get('USDT', 0) or 0)
             
-            self.logger.info(f"买入前余额检查 | 所需USDT: {amount_usdt:.2f} | 现货USDT: {spot_usdt:.2f}")
+            self.logger.info(f"买入前余额检查 | 所需USDT: {amount_usdt:.2f} | 交易账户USDT: {trading_usdt:.2f}")
             
-            # 如果现货余额足够，直接返回成功
-            if spot_usdt >= amount_usdt:
+            # 如果交易账户余额足够，直接返回成功
+            if trading_usdt >= amount_usdt:
                 return True
                 
-            # 现货不足，先检查资金账户
-            self.logger.info(f"现货USDT不足，检查资金账户...")
+            # 交易账户不足，先检查资金账户
+            self.logger.info(f"交易账户USDT不足，检查资金账户...")
             funding_balance = await self.exchange.fetch_funding_balance()
             funding_usdt = float(funding_balance.get('USDT', 0) or 0)
             
             self.logger.info(f"资金账户USDT余额: {funding_usdt:.2f}")
             
-            # 如果资金账户有余额，尝试从资金账户转到现货
+            # 如果资金账户有余额，尝试从资金账户转到交易账户
             if funding_usdt > 0:
                 # 计算需要转账的金额（增加5%缓冲，但不超过资金账户余额）
-                needed_from_funding = min((amount_usdt - spot_usdt) * 1.05, funding_usdt)
+                needed_from_funding = min((amount_usdt - trading_usdt) * 1.05, funding_usdt)
                 
                 if needed_from_funding >= 0.01:  # 最小转账金额
-                    self.logger.info(f"从资金账户转账 {needed_from_funding:.2f} USDT 到现货账户")
+                    self.logger.info(f"从资金账户转账 {needed_from_funding:.2f} USDT 到交易账户")
                     try:
                         # 使用funding_api直接转账
                         transfer_result = await asyncio.to_thread(
@@ -1706,12 +1709,12 @@ class GridTrader:
                             ccy='USDT',
                             amt="{:.2f}".format(needed_from_funding),
                             from_='6',  # 6 = 资金账户
-                            to='18',    # 18 = 现货账户
+                            to='18',    # 18 = 交易账户（统一交易账户）
                             type='0'    # 0 = 账户内划转
                         )
                         
                         if transfer_result['code'] == '0':
-                            self.logger.info(f"资金账户→现货转账成功")
+                            self.logger.info(f"资金账户→交易账户转账成功")
                             # 清除缓存
                             self.exchange.balance_cache = {'timestamp': 0, 'data': None}
                             self.exchange.funding_balance_cache = {'timestamp': 0, 'data': {}}
@@ -1719,14 +1722,14 @@ class GridTrader:
                             # 等待资金到账
                             await asyncio.sleep(2)
                             
-                            # 再次检查现货余额
-                            new_balance = await self.exchange.fetch_balance({'type': 'spot'})
+                            # 再次检查交易账户余额
+                            new_balance = await self.exchange.fetch_balance()
                             if new_balance and 'free' in new_balance:
-                                spot_usdt = float(new_balance.get('free', {}).get('USDT', 0) or 0)
-                                self.logger.info(f"转账后现货USDT: {spot_usdt:.2f}")
+                                trading_usdt = float(new_balance.get('free', {}).get('USDT', 0) or 0)
+                                self.logger.info(f"转账后交易账户USDT: {trading_usdt:.2f}")
                                 
                                 # 如果现在余额足够，返回成功
-                                if spot_usdt >= amount_usdt:
+                                if trading_usdt >= amount_usdt:
                                     return True
                         else:
                             self.logger.warning(f"资金账户转账失败: {transfer_result['msg']}")
@@ -1734,50 +1737,50 @@ class GridTrader:
                         self.logger.warning(f"资金账户转账异常: {str(e)}")
             
             # 如果资金账户转账后仍不足，尝试从简单赚币赎回
-            self.logger.info(f"现货+资金账户仍不足，尝试从简单赚币赎回...")
+            self.logger.info(f"交易账户+资金账户仍不足，尝试从简单赚币赎回...")
             savings_balance = await self.exchange.fetch_savings_balance()
             savings_usdt = float(savings_balance.get('USDT', 0) or 0)
             
             self.logger.info(f"简单赚币USDT余额: {savings_usdt:.2f}")
             
             # 检查总余额是否足够
-            total_available = spot_usdt + savings_usdt
+            total_available = trading_usdt + savings_usdt
             if total_available < amount_usdt:
                 # 总资金不足，发送通知
                 error_msg = f"资金不足通知\\n交易类型: 买入\\n所需USDT: {amount_usdt:.2f}\\n" \
-                           f"现货余额: {spot_usdt:.2f}\\n资金账户余额: {funding_usdt:.2f}\\n" \
+                           f"交易账户余额: {trading_usdt:.2f}\\n资金账户余额: {funding_usdt:.2f}\\n" \
                            f"简单赚币余额: {savings_usdt:.2f}\\n" \
                            f"缺口: {amount_usdt - total_available:.2f}"
-                self.logger.error(f"买入资金不足: 现货+资金账户+简单赚币总额不足以执行交易")
+                self.logger.error(f"买入资金不足: 交易账户+资金账户+简单赚币总额不足以执行交易")
                 send_pushplus_message(error_msg, "资金不足警告")
                 return False
                 
             # 计算需要赎回的金额（增加5%缓冲）
-            needed_amount = (amount_usdt - spot_usdt) * 1.05
+            needed_amount = (amount_usdt - trading_usdt) * 1.05
             
-            # 从理财赎回
-            self.logger.info(f"从理财赎回 {needed_amount:.2f} USDT")
+            # 从理财赎回到交易账户
+            self.logger.info(f"从理财赎回 {needed_amount:.2f} USDT 到交易账户")
             await self.exchange.transfer_to_spot('USDT', needed_amount)
             
             # 等待资金到账
             await asyncio.sleep(5)
             
             # 再次检查余额
-            new_balance = await self.exchange.fetch_balance({'type': 'spot'})
+            new_balance = await self.exchange.fetch_balance()
             
             # 防御性检查：确保返回的余额是有效的
             if not new_balance or 'free' not in new_balance:
-                self.logger.error("赎回后获取现货余额失败，返回无效数据")
+                self.logger.error("赎回后获取交易账户余额失败，返回无效数据")
                 return False
                 
             new_usdt = float(new_balance.get('free', {}).get('USDT', 0) or 0)
             
-            self.logger.info(f"赎回后余额检查 | 现货USDT: {new_usdt:.2f}")
+            self.logger.info(f"赎回后余额检查 | 交易账户USDT: {new_usdt:.2f}")
             
             if new_usdt >= amount_usdt:
                 return True
             else:
-                error_msg = f"资金赎回后仍不足\\n交易类型: 买入\\n所需USDT: {amount_usdt:.2f}\\n现货余额: {new_usdt:.2f}"
+                error_msg = f"资金赎回后仍不足\\n交易类型: 买入\\n所需USDT: {amount_usdt:.2f}\\n交易账户余额: {new_usdt:.2f}"
                 self.logger.error(error_msg)
                 send_pushplus_message(error_msg, "资金不足警告")
                 return False
