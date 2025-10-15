@@ -8,7 +8,7 @@ import numpy as np
 from datetime import datetime
 import time
 import math
-from helpers import send_pushplus_message, format_trade_message
+from helpers import send_pushplus_message, format_trade_message, LogHelper
 import json
 from monitor import TradingMonitor
 from position_controller_s1 import PositionControllerS1
@@ -68,6 +68,7 @@ class GridTrader:
         if self.initialized:
             return
         
+        LogHelper.log_section(self.logger, "网格交易系统初始化")
         self.logger.info("正在加载市场数据...")
         try:
             # 确保市场数据加载成功
@@ -210,7 +211,11 @@ class GridTrader:
             # 从最低价反弹指定比例时触发买入
             if self.lowest and current_price >= self.lowest * (1 + threshold):
                 self.buying_or_selling = False # 不在买入或卖出
-                self.logger.info(f"触发买入信号 | 当前价: {current_price:.2f} | 已反弹: {(current_price/self.lowest-1)*100:.2f}%")
+                trigger_price = self.lowest * (1 + threshold)
+                rebound_pct = (current_price/self.lowest-1)*100
+                LogHelper.log_trade_signal(
+                    self.logger, "买入", current_price, trigger_price, rebound_pct
+                )
                 # 检查买入余额是否充足
                 if not await self.check_buy_balance(current_price):
                     return False
@@ -246,7 +251,11 @@ class GridTrader:
             # 从最高价下跌指定比例时触发卖出
             if self.highest and current_price <= self.highest * (1 - threshold):
                 self.buying_or_selling = False # 不在买入或卖出
-                self.logger.info(f"触发卖出信号 | 当前价: {current_price:.2f} | 目标价: {self.highest * (1 - threshold):.5f} | 已下跌: {(1-current_price/self.highest)*100:.2f}%")
+                trigger_price = self.highest * (1 - threshold)
+                drop_pct = (1-current_price/self.highest)*100
+                LogHelper.log_trade_signal(
+                    self.logger, "卖出", current_price, trigger_price, drop_pct
+                )
                 # 检查卖出余额是否充足
                 if not await self.check_sell_balance():
                     return False
@@ -330,6 +339,9 @@ class GridTrader:
             return default_interval_hours * 3600
     
     async def main_loop(self):
+        """主交易循环"""
+        LogHelper.log_section(self.logger, "启动主交易循环")
+        
         while True:
             try:
                 if not self.initialized:
@@ -515,11 +527,9 @@ class GridTrader:
                         self.logger.warning(f"卖出余额不足，第 {retry_count + 1} 次尝试中止")
                         return False
 
-                self.logger.info(
-                    f"尝试第 {retry_count + 1}/{max_retries} 次 {side} 单 | "
-                    f"价格: {order_price} | "
-                    f"金额: {amount_usdt:.2f} USDT | "
-                    f"数量: {amount:.8f} OKB"
+                LogHelper.log_order_execution(
+                    self.logger, side, retry_count + 1, max_retries,
+                    order_price, amount, amount_usdt
                 )
                 
                 # 创建订单
@@ -547,7 +557,10 @@ class GridTrader:
                 
                 # 订单已成交
                 if updated_order['status'] == 'closed':
-                    self.logger.info(f"订单已成交 | ID: {order_id}")
+                    LogHelper.log_order_result(
+                        self.logger, side, order_id, 'closed',
+                        float(updated_order['price']), float(updated_order['filled'])
+                    )
                     # 更新基准价
                     self.base_price = float(updated_order['price'])
                     # 重置最高价和最低价，让策略基于新基准价重新开始
@@ -909,11 +922,9 @@ class GridTrader:
             new_grid = max(min(new_grid, self.config.GRID_PARAMS['max']), self.config.GRID_PARAMS['min'])
             
             if new_grid != self.grid_size:
-                self.logger.info(
-                    f"调整网格大小 | "
-                    f"波动率: {volatility:.2%} | "
-                    f"原网格: {self.grid_size:.2f}% | "
-                    f"新网格: {new_grid:.2f}%"
+                LogHelper.log_grid_adjustment(
+                    self.logger, self.grid_size, new_grid, volatility,
+                    f"基于波动率区间调整"
                 )
                 self.grid_size = new_grid
             
@@ -1707,11 +1718,10 @@ class GridTrader:
                 
                 # 如果买入后仓位比例会超过最大限制，拒绝买入
                 if position_ratio_after_buy > self.config.MAX_POSITION_RATIO:
-                    self.logger.warning(
-                        f"买入会导致仓位超限 | "
-                        f"当前仓位比例: {(position_value/(position_value+usdt_balance)):.2%} | "
-                        f"买入后仓位比例: {position_ratio_after_buy:.2%} | "
-                        f"最大允许: {self.config.MAX_POSITION_RATIO:.2%}"
+                    current_ratio = position_value/(position_value+usdt_balance) if (position_value+usdt_balance) > 0 else 0
+                    LogHelper.log_position_check(
+                        self.logger, current_ratio, position_ratio_after_buy,
+                        self.config.MAX_POSITION_RATIO, "买入", False
                     )
                     return False
             
@@ -1855,11 +1865,10 @@ class GridTrader:
                 
                 # 如果卖出后仓位比例会低于最小限制，拒绝卖出
                 if position_ratio_after_sell < self.config.MIN_POSITION_RATIO:
-                    self.logger.warning(
-                        f"卖出会导致仓位过低 | "
-                        f"当前仓位比例: {(position_value/(position_value+usdt_balance)):.2%} | "
-                        f"卖出后仓位比例: {position_ratio_after_sell:.2%} | "
-                        f"最小允许: {self.config.MIN_POSITION_RATIO:.2%}"
+                    current_ratio = position_value/(position_value+usdt_balance) if (position_value+usdt_balance) > 0 else 0
+                    LogHelper.log_position_check(
+                        self.logger, current_ratio, position_ratio_after_sell,
+                        self.config.MIN_POSITION_RATIO, "卖出", False
                     )
                     return False
             
