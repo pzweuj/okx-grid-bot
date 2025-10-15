@@ -5,6 +5,10 @@ import aiofiles
 import logging
 from datetime import datetime
 import psutil
+import secrets
+from aiohttp_session import setup, get_session
+from aiohttp_session.cookie_storage import EncryptedCookieStorage
+from cryptography import fernet
 
 class IPLogger:
     def __init__(self):
@@ -72,6 +76,114 @@ async def _read_log_content():
     filtered_lines.reverse()
     
     return '\n'.join(filtered_lines)
+
+async def handle_login_page(request):
+    """显示登录页面"""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>登录 - 网格交易监控系统</title>
+        <meta charset="utf-8">
+        <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    </head>
+    <body class="bg-gray-100 flex items-center justify-center min-h-screen">
+        <div class="bg-white p-8 rounded-lg shadow-md w-96">
+            <h1 class="text-2xl font-bold mb-6 text-center text-gray-800">网格交易监控系统</h1>
+            <form id="loginForm" class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">密码</label>
+                    <input type="password" id="password" 
+                           class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="请输入密码" required>
+                </div>
+                <button type="submit" 
+                        class="w-full bg-blue-600 text-white py-2 rounded-md hover:bg-blue-700 transition">
+                    登录
+                </button>
+                <div id="error" class="text-red-500 text-sm text-center hidden"></div>
+            </form>
+        </div>
+        <script>
+            document.getElementById('loginForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const password = document.getElementById('password').value;
+                const errorDiv = document.getElementById('error');
+                
+                try {
+                    const response = await fetch('/api/login', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({password: password})
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        window.location.href = '/dashboard';
+                    } else {
+                        errorDiv.textContent = '密码错误';
+                        errorDiv.classList.remove('hidden');
+                    }
+                } catch (error) {
+                    errorDiv.textContent = '登录失败，请重试';
+                    errorDiv.classList.remove('hidden');
+                }
+            });
+        </script>
+    </body>
+    </html>
+    """
+    return web.Response(text=html, content_type='text/html')
+
+async def handle_login(request):
+    """处理登录请求"""
+    try:
+        data = await request.json()
+        password = data.get('password', '')
+        
+        # 从环境变量获取密码
+        correct_password = os.getenv('WEB_PASSWORD', 'admin123')
+        
+        if password == correct_password:
+            session = await get_session(request)
+            session['authenticated'] = True
+            return web.json_response({'success': True})
+        else:
+            return web.json_response({'success': False, 'error': '密码错误'})
+    except Exception as e:
+        logging.error(f"登录处理失败: {str(e)}")
+        return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+async def handle_logout(request):
+    """处理登出请求"""
+    session = await get_session(request)
+    session.clear()
+    return web.Response(status=302, headers={'Location': '/'})
+
+@web.middleware
+async def auth_middleware(request, handler):
+    """认证中间件"""
+    # 如果未设置密码，则不需要认证
+    web_password = os.getenv('WEB_PASSWORD', '')
+    if not web_password:
+        return await handler(request)
+    
+    # 公开路径不需要认证
+    public_paths = ['/', '/api/login']
+    
+    if request.path in public_paths:
+        return await handler(request)
+    
+    # 检查会话
+    session = await get_session(request)
+    if not session.get('authenticated'):
+        if request.path.startswith('/api/'):
+            return web.json_response({'error': '未授权'}, status=401)
+        else:
+            return web.Response(status=302, headers={'Location': '/'})
+    
+    return await handler(request)
 
 async def handle_log(request):
     try:
@@ -279,7 +391,10 @@ async def handle_log(request):
 
                 <!-- 系统日志 -->
                 <div class="card">
-                    <h2 class="text-lg font-semibold mb-4">系统日志</h2>
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-lg font-semibold">系统日志</h2>
+                        {f'<button onclick="logout()" class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition">退出登录</button>' if os.getenv('WEB_PASSWORD', '') else ''}
+                    </div>
                     <div class="log-container" id="log-content">
                         <pre>{content}</pre>
                     </div>
@@ -370,6 +485,13 @@ async def handle_log(request):
                 
                 // 页面加载时立即更新一次
                 updateStatus();
+                
+                // 登出函数
+                function logout() {{
+                    if (confirm('确定要退出登录吗？')) {{
+                        window.location.href = '/api/logout';
+                    }}
+                }}
             </script>
         </body>
         </html>
@@ -482,7 +604,15 @@ async def handle_status(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def start_web_server(trader):
+    # 生成密钥用于加密cookie
+    fernet_key = fernet.Fernet.generate_key()
+    secret_key = fernet_key
+    
     app = web.Application()
+    
+    # 设置会话管理
+    setup(app, EncryptedCookieStorage(secret_key))
+    
     # 添加中间件处理无效请求
     @web.middleware
     async def error_middleware(request, handler):
@@ -502,13 +632,27 @@ async def start_web_server(trader):
             )
     
     app.middlewares.append(error_middleware)
+    app.middlewares.append(auth_middleware)
+    
     app['trader'] = trader
     app['ip_logger'] = IPLogger()
     
     # 禁用访问日志
     logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
     
-    app.router.add_get('/', handle_log)
+    # 路由配置
+    async def handle_root(request):
+        """根路径处理：如果设置了密码则显示登录页，否则直接显示面板"""
+        web_password = os.getenv('WEB_PASSWORD', '')
+        if web_password:
+            return await handle_login_page(request)
+        else:
+            return await handle_log(request)
+    
+    app.router.add_get('/', handle_root)
+    app.router.add_post('/api/login', handle_login)
+    app.router.add_get('/api/logout', handle_logout)
+    app.router.add_get('/dashboard', handle_log)
     app.router.add_get('/api/logs', handle_log_content)
     app.router.add_get('/api/status', handle_status)
     runner = web.AppRunner(app)
