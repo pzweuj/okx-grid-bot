@@ -72,16 +72,16 @@ def send_wechat_message(content, title="交易信号通知"):
     }
     
     try:
-        logging.info(f"正在发送企业微信推送通知: {title}")
+        logging.debug(f"发送推送通知: {title}")
         response = requests.post(url, json=data)
         response_json = response.json()
         
         if response.status_code == 200 and response_json.get('errcode') == 0:
-            logging.info(f"企业微信消息推送成功: {title}")
+            logging.debug(f"推送成功: {title}")
         else:
-            logging.error(f"企业微信消息推送失败: 状态码={response.status_code}, 响应={response_json}")
+            logging.error(f"推送失败: 状态码={response.status_code}, 响应={response_json}, 标题={title}")
     except Exception as e:
-        logging.error(f"企业微信消息推送异常: {str(e)}", exc_info=True)
+        logging.error(f"推送异常: {str(e)}, 标题={title}", exc_info=True)
 
 # 保持向后兼容的别名
 send_pushplus_message = send_wechat_message

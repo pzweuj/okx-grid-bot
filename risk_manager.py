@@ -15,8 +15,8 @@ class AdvancedRiskManager:
             if not hasattr(self, 'last_position_ratio'):
                 self.last_position_ratio = position_ratio
             
-            # 只在仓位比例变化超过0.1%时打印日志
-            if abs(position_ratio - self.last_position_ratio) > 0.001:
+            # 只在仓位比例变化超过0.5%时打印日志（避免过于频繁）
+            if abs(position_ratio - self.last_position_ratio) > 0.005:
                 self.logger.info(
                     f"风控检查 | "
                     f"当前仓位比例: {position_ratio:.2%} | "
@@ -37,28 +37,38 @@ class AdvancedRiskManager:
             return False
 
     async def _get_position_value(self):
+        """获取当前持仓价值（包含现货、资金账户和简单赚币）"""
         balance = await self.trader.exchange.fetch_balance()
         funding_balance = await self.trader.exchange.fetch_funding_balance()
+        savings_balance = await self.trader.exchange.fetch_savings_balance()
+        
         if not self.trader.symbol_info:
-            self.trader.trade_log.error("交易对信息未初始化")
+            self.logger.error("交易对信息未初始化")
             return 0
+        
+        # 汇总所有账户的基础币种余额
         base_amount = (
             float(balance.get('free', {}).get(self.trader.symbol_info['base'], 0)) +
-            float(funding_balance.get(self.trader.symbol_info['base'], 0))
+            float(funding_balance.get(self.trader.symbol_info['base'], 0)) +
+            float(savings_balance.get(self.trader.symbol_info['base'], 0))
         )
+        
         current_price = await self.trader._get_latest_price()
         return base_amount * current_price
 
     async def _get_position_ratio(self):
-        """获取当前仓位占总资产比例"""
+        """获取当前仓位占总资产比例（包含现货、资金账户和简单赚币）"""
         try:
             position_value = await self._get_position_value()
             balance = await self.trader.exchange.fetch_balance()
             funding_balance = await self.trader.exchange.fetch_funding_balance()
+            savings_balance = await self.trader.exchange.fetch_savings_balance()
             
+            # 汇总所有账户的USDT余额
             usdt_balance = (
                 float(balance.get('free', {}).get('USDT', 0)) +
-                float(funding_balance.get('USDT', 0))
+                float(funding_balance.get('USDT', 0)) +
+                float(savings_balance.get('USDT', 0))
             )
             
             total_assets = position_value + usdt_balance

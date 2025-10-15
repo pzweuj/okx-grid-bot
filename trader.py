@@ -963,82 +963,8 @@ class GridTrader:
         formatted_amount = f"{amount:.3f}"
         return float(formatted_amount)
 
-    async def calculate_trade_amount(self, side, order_price):
-        # 获取必要参数
-        balance = await self.exchange.fetch_balance()
-        total_assets = float(balance['total']['USDT']) + float(balance['total'].get(self.symbol_info['base'], 0)) * order_price
-        
-        # 计算波动率调整因子
-        volatility = await self._calculate_volatility()
-        volatility_factor = 1 / (1 + volatility * 10)  # 波动越大，交易量越小
-        
-        # 计算凯利仓位
-        win_rate = await self.calculate_win_rate()
-        payoff_ratio = await self.calculate_payoff_ratio()
-        
-        # 安全版凯利公式计算
-        kelly_f = max(0.0, (win_rate * payoff_ratio - (1 - win_rate)) / payoff_ratio)  # 确保非负
-        kelly_f = min(kelly_f, 0.3)  # 最大不超过30%仓位
-        
-        # 获取价格分位因子
-        price_percentile = await self._get_price_percentile()
-        if side == 'buy':
-            percentile_factor = 1 + (1 - price_percentile) * 0.5  # 价格越低，买入越多
-        else:
-            percentile_factor = 1 + price_percentile * 0.5  # 价格越高，卖出越多
-        
-        # 动态计算交易金额
-        risk_adjusted_amount = min(
-            total_assets * self.config.RISK_FACTOR * volatility_factor * kelly_f * percentile_factor,
-            total_assets * self.config.MAX_POSITION_RATIO
-        )
-        
-        # 应用最小/最大限制
-        amount_usdt = max(
-            min(risk_adjusted_amount, self.config.BASE_AMOUNT),
-            self.config.MIN_TRADE_AMOUNT
-        )
-        
-        return amount_usdt
-
-    async def calculate_win_rate(self):
-        """计算胜率"""
-        try:
-            trades = self.order_tracker.get_trade_history()
-            if not trades:
-                return 0
-            
-            # 计算盈利交易数量
-            winning_trades = [t for t in trades if t['profit'] > 0]
-            win_rate = len(winning_trades) / len(trades)
-            
-            return win_rate
-        except Exception as e:
-            self.logger.error(f"计算胜率失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")
-            return 0
-
-    async def calculate_payoff_ratio(self):
-        """计算盈亏比"""
-        trades = self.order_tracker.get_trade_history()
-        if len(trades) < 10:
-            return 1.0
-        
-        avg_win = np.mean([t['profit'] for t in trades if t['profit'] > 0])
-        avg_loss = np.mean([abs(t['profit']) for t in trades if t['profit'] < 0])
-        return avg_win / avg_loss if avg_loss != 0 else 1.0
-
-    async def save_trade_stats(self):
-        """保存交易统计数据"""
-        stats = {
-            'timestamp': datetime.now().isoformat(),
-            'grid_size': self.grid_size,
-            'position_size': self.current_position,
-            'volatility': await self._calculate_volatility(),
-            'win_rate': await self.calculate_win_rate(),
-            'payoff_ratio': await self.calculate_payoff_ratio()
-        }
-        with open('trade_stats.json', 'a') as f:
-            f.write(json.dumps(stats) + '\n')
+    # 已删除未使用的复杂交易金额计算方法（calculate_trade_amount, calculate_win_rate, calculate_payoff_ratio, save_trade_stats）
+    # 主流程使用的是 _calculate_order_amount() 方法
 
     async def _get_order_price(self, side):
         """获取订单价格"""
@@ -1064,52 +990,7 @@ class GridTrader:
             self.logger.error(f"获取订单价格失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")
             raise
 
-    async def _get_price_percentile(self, period='7d'):
-        """获取当前价格在历史中的分位位置"""
-        try:
-            # 获取过去7天价格数据（使用4小时K线）
-            ohlcv = await self.exchange.fetch_ohlcv(self.config.SYMBOL, '4H', limit=42)  # 42根4小时K线 ≈ 7天
-            if not ohlcv:
-                self.logger.warning("获取K线数据为空，使用默认分位值")
-                return 0.5
-            closes = [candle[4] for candle in ohlcv]
-            current_price = await self._get_latest_price()
-            
-            # 计算分位值
-            sorted_prices = sorted(closes)
-            lower = sorted_prices[int(len(sorted_prices)*0.25)]  # 25%分位
-            upper = sorted_prices[int(len(sorted_prices)*0.75)]  # 75%分位
-            
-            # 添加数据有效性检查
-            if len(sorted_prices) < 10:  # 当数据不足时使用更宽松的判断
-                self.logger.warning("历史数据不足，使用简化分位计算")
-                mid_price = (sorted_prices[0] + sorted_prices[-1]) / 2
-                return 0.5 if current_price >= mid_price else 0.0
-            
-            # 计算当前价格位置
-            if current_price <= lower:
-                return 0.0  # 处于低位
-            elif current_price >= upper:
-                return 1.0  # 处于高位
-            else:
-                return (current_price - lower) / (upper - lower)
-            
-        except Exception as e:
-            self.logger.error(f"获取价格分位失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")
-            return 0.5  # 默认中间位置
-
-    async def _calculate_required_funds(self, side):
-        """计算需要划转的资金量"""
-        current_price = await self._get_latest_price()
-        balance = await self.exchange.fetch_balance()
-        total_assets = float(balance['total']['USDT']) + float(balance['total'].get(self.symbol_info['base'], 0)) * current_price
-        
-        # 获取当前订单需要的金额
-        amount_usdt = await self.calculate_trade_amount(side, current_price)
-        
-        # 考虑手续费和滑价
-        required = amount_usdt * 1.05  # 增加5%缓冲
-        return min(required, self.config.MAX_POSITION_RATIO * total_assets)
+    # 已删除未使用的 _get_price_percentile 和 _calculate_required_funds 方法
 
     async def _transfer_excess_funds(self):
         """将超出总资产16%目标的部分资金转回理财账户"""
@@ -1123,9 +1004,9 @@ class GridTrader:
                 self.logger.warning("无法获取价格或总资产，跳过资金转移检查")
                 return
 
-            # 计算目标保留金额 (总资产的16%)
-            target_usdt_hold = total_assets * 0.16
-            target_coin_hold_value = total_assets * 0.16
+            # 计算目标保留金额 (总资产的15%，为交易金额10%的1.5倍缓冲)
+            target_usdt_hold = total_assets * 0.15
+            target_coin_hold_value = total_assets * 0.15
             target_coin_hold_amount = target_coin_hold_value / current_price
 
             # 获取当前现货可用余额
@@ -1178,46 +1059,7 @@ class GridTrader:
             self.logger.error(f"检查和划转资金失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")
             return False
 
-    async def _check_flip_signal(self):
-        """检查是否需要翻转交易方向"""
-        try:
-            current_price = self.current_price
-            price_diff = abs(current_price - self.base_price)
-            flip_threshold = self.base_price * FLIP_THRESHOLD(self.grid_size)
-            
-            if price_diff >= flip_threshold:
-                # 智能预划转资金
-                await self._pre_transfer_funds(current_price)
-                self.logger.info(f"价格偏离阈值 | 当前价: {current_price} | 基准价: {self.base_price}")
-                return True
-        except Exception as e:
-            self.logger.error(f"翻转信号检查失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")
-            return False
-
-    async def _pre_transfer_funds(self, current_price):
-        """智能预划转资金"""
-        try:
-            # 根据预期方向计算需求
-            expected_side = 'buy' if current_price > self.base_price else 'sell'
-            required = await self._calculate_required_funds(expected_side)
-            
-            # 添加20%缓冲
-            required_with_buffer = required * 1.2
-            
-            # 分批次划转（应对大额划转限制）
-            max_single_transfer = 5000  # 假设单次最大划转5000 USDT
-            while required_with_buffer > 0:
-                transfer_amount = min(required_with_buffer, max_single_transfer)
-                await self.exchange.transfer_to_spot('USDT', transfer_amount)
-                required_with_buffer -= transfer_amount
-                self.logger.info(f"预划转完成: {transfer_amount} USDT | 剩余需划转: {required_with_buffer}")
-                
-            self.logger.info("资金预划转完成，等待10秒确保到账")
-            await asyncio.sleep(10)  # 等待资金到账
-            
-        except Exception as e:
-            self.logger.error(f"预划转失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")
-            raise
+    # 已删除未使用的 _check_flip_signal 和 _pre_transfer_funds 方法
 
     def _calculate_dynamic_base(self, total_assets):
         """计算动态基础交易金额"""
@@ -1294,177 +1136,7 @@ class GridTrader:
         except Exception as e:
             self.logger.error(f"检查资金账户余额失败: {str(e)}")
 
-    async def _check_and_transfer_initial_funds(self):
-        """检查初始资金分配并执行必要的划转"""
-        try:
-            # 获取现货和理财账户余额
-            balance = await self.exchange.fetch_balance()
-            funding_balance = await self.exchange.fetch_funding_balance()
-            savings_balance = await self.exchange.fetch_savings_balance()
-            total_assets = await self._get_total_assets()
-            current_price = await self._get_latest_price()
-            
-            # 计算目标持仓（总资产的16%）
-            target_usdt = total_assets * 0.16
-            target_okb = (total_assets * 0.16) / current_price
-            
-            # 获取现货余额
-            usdt_balance = float(balance['free'].get('USDT', 0))
-            coin_balance = float(balance['free'].get(self.symbol_info['base'], 0))
-            
-            # 获取资金账户余额
-            funding_usdt = float(funding_balance.get('USDT', 0))
-            funding_okb = float(funding_balance.get(self.symbol_info['base'], 0))
-            
-            # 获取简单赚币余额
-            savings_usdt = float(savings_balance.get('USDT', 0) or 0)
-            savings_okb = float(savings_balance.get(self.symbol_info['base'], 0) or 0)
-            
-            # ========== 新增：先将资金账户余额转到现货账户 ==========
-            # 转移USDT
-            if funding_usdt >= 0.01:  # 最小转账金额
-                self.logger.info(f"发现资金账户USDT余额: {funding_usdt:.2f}，自动转到现货账户")
-                try:
-                    transfer_result = await asyncio.to_thread(
-                        self.exchange.funding_api.funds_transfer,
-                        ccy='USDT',
-                        amt="{:.2f}".format(funding_usdt),
-                        from_='6',  # 6 = 资金账户
-                        to='18',    # 18 = 现货账户
-                        type='0'    # 0 = 账户内划转
-                    )
-                    if transfer_result['code'] == '0':
-                        self.logger.info(f"资金账户→现货: {funding_usdt:.2f} USDT 转账成功")
-                        usdt_balance += funding_usdt  # 更新现货余额
-                        funding_usdt = 0  # 资金账户清零
-                        # 清除缓存
-                        self.exchange.balance_cache = {'timestamp': 0, 'data': None}
-                        self.exchange.funding_balance_cache = {'timestamp': 0, 'data': {}}
-                    else:
-                        self.logger.warning(f"资金账户USDT转账失败: {transfer_result['msg']}")
-                except Exception as e:
-                    self.logger.warning(f"资金账户USDT转账异常: {str(e)}")
-            
-            # 转移基础币种
-            if funding_okb >= 0.001:  # 最小转账金额
-                self.logger.info(f"发现资金账户{self.symbol_info['base']}余额: {funding_okb:.8f}，自动转到现货账户")
-                try:
-                    transfer_result = await asyncio.to_thread(
-                        self.exchange.funding_api.funds_transfer,
-                        ccy=self.symbol_info['base'],
-                        amt="{:.8f}".format(funding_okb),
-                        from_='6',  # 6 = 资金账户
-                        to='18',    # 18 = 现货账户
-                        type='0'    # 0 = 账户内划转
-                    )
-                    if transfer_result['code'] == '0':
-                        self.logger.info(f"资金账户→现货: {funding_okb:.8f} {self.symbol_info['base']} 转账成功")
-                        coin_balance += funding_okb  # 更新现货余额
-                        funding_okb = 0  # 资金账户清零
-                        # 清除缓存
-                        self.exchange.balance_cache = {'timestamp': 0, 'data': None}
-                        self.exchange.funding_balance_cache = {'timestamp': 0, 'data': {}}
-                    else:
-                        self.logger.warning(f"资金账户{self.symbol_info['base']}转账失败: {transfer_result['msg']}")
-                except Exception as e:
-                    self.logger.warning(f"资金账户{self.symbol_info['base']}转账异常: {str(e)}")
-            
-            # 等待转账完成
-            if funding_usdt >= 0.01 or funding_okb >= 0.001:
-                await asyncio.sleep(1)
-            # ========== 资金账户转移完成 ==========
-            
-            # 计算总余额（现货+资金账户+简单赚币）
-            total_usdt = usdt_balance + funding_usdt + savings_usdt
-            total_okb = coin_balance + funding_okb + savings_okb
-            
-            # 调整USDT余额
-            # 现货+资金账户的总和
-            available_usdt = usdt_balance + funding_usdt
-            
-            if available_usdt > target_usdt:
-                # 多余的申购到理财（优先从现货转出）
-                excess_amount = available_usdt - target_usdt
-                # 计算实际可从现货转出的金额（不能让现货变成负数）
-                # 预留0.1 USDT作为安全缓冲，避免余额不足
-                safe_spot_balance = max(0, usdt_balance - 0.1)
-                transfer_amount = min(safe_spot_balance, excess_amount)
-                
-                if transfer_amount >= 1.0:  # 通常USDT划转的最小额度是1.0
-                    self.logger.info(f"发现可划转USDT: {transfer_amount:.2f} (现货: {usdt_balance:.2f}, 资金账户: {funding_usdt:.2f}, 超出: {excess_amount:.2f})")
-                    try:
-                        await self.exchange.transfer_to_savings('USDT', transfer_amount)
-                        self.logger.info(f"已将 {transfer_amount:.2f} USDT 申购到理财")
-                    except Exception as e_savings:
-                        self.logger.error(f"申购USDT到理财失败: {str(e_savings)} | 堆栈信息: {traceback.format_exc()}")
-                else:
-                    self.logger.info(f"可划转USDT ({transfer_amount:.2f}) 低于最小申购额1.0 USDT，跳过申购")
-            elif available_usdt < target_usdt:
-                # 现货+资金账户不足，需要从简单赚币赎回
-                transfer_amount = target_usdt - available_usdt
-                
-                # 检查简单赚币中是否有足够的USDT
-                if savings_usdt < 1.0:
-                    self.logger.info(f"简单赚币USDT余额({savings_usdt:.2f})不足最小赎回金额(1.0)，跳过赎回")
-                elif transfer_amount >= 1.0:
-                    # 实际赎回金额不能超过简单赚币余额
-                    actual_transfer = min(transfer_amount, savings_usdt)
-                    self.logger.info(f"从理财赎回USDT: {actual_transfer:.2f} (需要: {transfer_amount:.2f}, 可用: {savings_usdt:.2f})")
-                    try:
-                        await self.exchange.transfer_to_spot('USDT', actual_transfer)
-                        self.logger.info(f"已从理财赎回 {actual_transfer:.2f} USDT")
-                    except Exception as e_spot:
-                        self.logger.error(f"从理财赎回USDT失败: {str(e_spot)} | 堆栈信息: {traceback.format_exc()}")
-                else:
-                    self.logger.info(f"需要从理财赎回的USDT金额 ({transfer_amount:.2f}) 过小，跳过")
-            
-            # 调整OKB余额
-            # 现货+资金账户的总和
-            available_okb = coin_balance + funding_okb
-            
-            if available_okb > target_okb:
-                # 多余的申购到理财（优先从现货转出）
-                excess_amount = available_okb - target_okb
-                # 计算实际可从现货转出的金额（不能让现货变成负数）
-                # 预留0.0001作为安全缓冲，避免余额不足
-                safe_spot_balance = max(0, coin_balance - 0.0001)
-                transfer_amount = min(safe_spot_balance, excess_amount)
-                
-                if transfer_amount >= 0.01:
-                    self.logger.info(f"发现可划转{self.symbol_info['base']}: {transfer_amount:.4f} (现货: {coin_balance:.4f}, 资金账户: {funding_okb:.4f}, 超出: {excess_amount:.4f})")
-                    try:
-                        await self.exchange.transfer_to_savings(self.symbol_info['base'], transfer_amount)
-                        self.logger.info(f"已将 {transfer_amount:.4f} {self.symbol_info['base']} 申购到理财")
-                    except Exception as e_savings:
-                        self.logger.error(f"申购{self.symbol_info['base']}到理财失败: {str(e_savings)} | 堆栈信息: {traceback.format_exc()}")
-                else:
-                    self.logger.info(f"可划转{self.symbol_info['base']} ({transfer_amount:.4f}) 低于最小申购额 0.01 {self.symbol_info['base']}，跳过申购")
-            elif available_okb < target_okb:
-                # 现货+资金账户不足，需要从简单赚币赎回
-                transfer_amount = target_okb - available_okb
-                
-                # 检查简单赚币中是否有足够的OKB
-                if savings_okb < 0.001:
-                    self.logger.info(f"简单赚币{self.symbol_info['base']}余额({savings_okb:.8f})不足最小赎回金额(0.001)，跳过赎回")
-                elif transfer_amount >= 0.001:
-                    # 实际赎回金额不能超过简单赚币余额
-                    actual_transfer = min(transfer_amount, savings_okb)
-                    self.logger.info(f"从理财赎回{self.symbol_info['base']}: {actual_transfer:.8f} (需要: {transfer_amount:.8f}, 可用: {savings_okb:.8f})")
-                    try:
-                        await self.exchange.transfer_to_spot(self.symbol_info['base'], actual_transfer)
-                        self.logger.info(f"已从理财赎回 {actual_transfer:.4f} {self.symbol_info['base']}")
-                    except Exception as e_spot:
-                        self.logger.error(f"从理财赎回{self.symbol_info['base']}失败: {str(e_spot)} | 堆栈信息: {traceback.format_exc()}")
-                else:
-                    self.logger.info(f"需要从理财赎回的{self.symbol_info['base']}金额 ({transfer_amount:.8f}) 过小，跳过")
-            
-            self.logger.info(
-                f"资金分配完成\n"
-                f"USDT: {total_usdt:.2f}\n"
-                f"{self.symbol_info['base']}: {total_okb:.4f}"
-            )
-        except Exception as e:
-            self.logger.error(f"初始资金检查失败: {str(e)} | 堆栈信息: {traceback.format_exc()}")
+    # 已删除未使用的 _check_and_transfer_initial_funds 方法（从未被调用）
 
     async def _get_total_assets(self):
         """获取总资产价值（USDT）"""

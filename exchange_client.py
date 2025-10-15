@@ -78,7 +78,8 @@ class ExchangeClient:
         self.time_diff = 0
         self.balance_cache = {'timestamp': 0, 'data': None}
         self.funding_balance_cache = {'timestamp': 0, 'data': {}}
-        self.cache_ttl = 1/5  # 缓存有效期（秒）
+        self.savings_balance_cache = {'timestamp': 0, 'data': {}}  # 新增简单赚币缓存
+        self.cache_ttl = 5  # 缓存有效期5秒，从0.2秒优化为5秒
     
     def _verify_credentials(self):
         """验证API密钥是否存在"""
@@ -130,15 +131,11 @@ class ExchangeClient:
             return None
 
     async def fetch_ticker(self, symbol):
-        self.logger.debug(f"获取行情数据 {symbol}...")
-        start = datetime.now()
+        """获取行情数据（静默模式，仅错误时记录）"""
         try:
             result = self.market_api.get_ticker(instId=symbol.replace('/', '-'))
             if result['code'] == '0':
-                ticker = result['data'][0]
-                latency = (datetime.now() - start).total_seconds()
-                self.logger.debug(f"获取行情成功 | 延迟: {latency:.3f}s | 最新价: {ticker['last']}")
-                return ticker
+                return result['data'][0]
             else:
                 error_msg = f"获取行情失败: {result['msg']} | 错误码: {result['code']} | 参数: symbol={symbol}"
                 self.logger.error(error_msg)
@@ -179,23 +176,26 @@ class ExchangeClient:
             return self.funding_balance_cache['data'] if self.funding_balance_cache['data'] else {}
     
     async def fetch_savings_balance(self):
-        """获取简单赚币（Savings）余额"""
+        """获取简单赚币（Savings）余额（含缓存机制）"""
+        now = time.time()
+        if now - self.savings_balance_cache['timestamp'] < self.cache_ttl:
+            return self.savings_balance_cache['data']
+        
         try:
             result = await asyncio.to_thread(self.savings_api.get_saving_balance)
-            self.logger.debug(f"Savings API响应: {result}")
-            
             if result['code'] == '0':
-                balances = {"USDT": 0.0, BASE_CURRENCY: 0.0}
-                if result['data']:
-                    for item in result['data']:
-                        asset = item['ccy']
-                        # amt是总金额，包含本金和收益
-                        amount = float(item.get('amt', 0))
-                        balances[asset] = amount
-                        self.logger.debug(f"简单赚币余额: {asset} = {amount}")
-                else:
-                    self.logger.warning("简单赚币API返回空数据")
-                return balances
+                savings_balance = {}
+                for item in result['data']:
+                    asset = item['ccy']
+                    amount = float(item['amt'])
+                    savings_balance[asset] = amount
+                
+                # 更新缓存
+                self.savings_balance_cache = {
+                    'timestamp': now,
+                    'data': savings_balance
+                }
+                return savings_balance
             else:
                 error_msg = f"获取Savings余额失败: {result['msg']} | 错误码: {result['code']}"
                 self.logger.error(error_msg)
@@ -247,7 +247,7 @@ class ExchangeClient:
                         balance['free'][asset] = 0
                     balance['total'][asset] += amount
                 
-                self.logger.debug(f"账户余额概要: {balance['total']}")
+                # 余额获取成功，不打印日志（避免频繁输出）
                 # 更新缓存
                 self.balance_cache = {
                     'timestamp': now,
@@ -389,12 +389,12 @@ class ExchangeClient:
                 formatted_amount = str(amount)
             
             # 步骤1: 从简单赚币赎回到资金账户
-            self.logger.info(f"步骤1: 从简单赚币赎回 {formatted_amount} {asset} 到资金账户")
+            self.logger.info(f"💰 赎回 {formatted_amount} {asset}: 简单赚币 → 资金账户")
             
             # 先查询当前简单赚币余额
             savings_balance = await self.fetch_savings_balance()
             current_savings = savings_balance.get(asset, 0)
-            self.logger.info(f"当前简单赚币{asset}余额: {current_savings:.8f}, 尝试赎回: {formatted_amount}")
+            self.logger.debug(f"当前简单赚币{asset}余额: {current_savings:.8f}")
             
             # 如果余额不足，调整赎回金额或跳过
             if current_savings <= 0:
@@ -427,13 +427,13 @@ class ExchangeClient:
                 self.logger.error(error_msg)
                 raise Exception(error_msg)
             
-            self.logger.info(f"简单赚币→资金账户赎回成功")
+            self.logger.debug(f"简单赚币→资金账户赎回成功")
             
             # 等待资金到账
             await asyncio.sleep(1)
             
             # 步骤2: 从资金账户转到现货账户
-            self.logger.info(f"步骤2: 将 {formatted_amount} {asset} 从资金账户转到现货")
+            self.logger.debug(f"步骤2: 将 {formatted_amount} {asset} 从资金账户转到现货")
             # 注意：OKX SDK使用 from_ 代替 from（避免Python关键字冲突）
             transfer_result = await asyncio.to_thread(
                 self.funding_api.funds_transfer,
@@ -449,7 +449,7 @@ class ExchangeClient:
                 self.logger.error(error_msg)
                 raise Exception(error_msg)
             
-            self.logger.info(f"资金账户→现货转账成功")
+            self.logger.info(f"✅ 赎回完成: {formatted_amount} {asset}")
             
             # 赎回后清除余额缓存，确保下次获取最新余额
             self.balance_cache = {'timestamp': 0, 'data': None}
@@ -473,7 +473,7 @@ class ExchangeClient:
                 formatted_amount = str(amount)
             
             # 步骤1: 从现货账户转到资金账户
-            self.logger.info(f"步骤1: 将 {formatted_amount} {asset} 从现货转到资金账户")
+            self.logger.debug(f"步骤1: 将 {formatted_amount} {asset} 从现货转到资金账户")
             # 注意：OKX SDK使用 from_ 代替 from（避免Python关键字冲突）
             transfer_result = await asyncio.to_thread(
                 self.funding_api.funds_transfer,
@@ -489,13 +489,13 @@ class ExchangeClient:
                 self.logger.error(error_msg)
                 raise Exception(error_msg)
             
-            self.logger.info(f"现货→资金账户转账成功")
+            self.logger.debug(f"现货→资金账户转账成功")
             
             # 等待资金到账
             await asyncio.sleep(1)
             
             # 步骤2: 从资金账户申购到简单赚币
-            self.logger.info(f"步骤2: 将 {formatted_amount} {asset} 申购到简单赚币")
+            self.logger.debug(f"步骤2: 将 {formatted_amount} {asset} 申购到简单赚币")
             
             # 检查最小申购金额（USDT最小1，其他币种最小0.001）
             min_purchase_amount = 1.0 if asset == 'USDT' else 0.001
@@ -506,7 +506,7 @@ class ExchangeClient:
             # 检查资金账户余额
             funding_balance = await self.fetch_funding_balance()
             funding_amount = funding_balance.get(asset, 0)
-            self.logger.info(f"资金账户{asset}余额: {funding_amount:.8f}")
+            self.logger.debug(f"资金账户{asset}余额: {funding_amount:.8f}")
             
             params = {
                 'ccy': asset,
@@ -514,9 +514,7 @@ class ExchangeClient:
                 'side': 'purchase',
                 'rate': '0.01',  # 年化利率1%（小数格式：0.01 = 1%），根据实际需求调整
             }
-            self.logger.info(f"申购参数: {params}")
             result = await asyncio.to_thread(self.savings_api.savings_purchase_redemption, **params)
-            self.logger.info(f"申购API响应: {result}")
             
             if result['code'] != '0':
                 error_msg = f"申购简单赚币失败: {result['msg']} | 错误码: {result['code']}"
@@ -527,7 +525,7 @@ class ExchangeClient:
                     return result
                 raise Exception(error_msg)
             
-            self.logger.info(f"申购成功: {result}")
+            self.logger.info(f"✅ 申购完成: {formatted_amount} {asset}")
             
             # 申购后清除余额缓存，确保下次获取最新余额
             self.balance_cache = {'timestamp': 0, 'data': None}

@@ -120,8 +120,8 @@ class OrderTracker:
         
         self.logger.info(f"添加交易记录: {trade}")
         self.trade_history.append(trade)
-        if len(self.trade_history) > 100:
-            self.trade_history = self.trade_history[-100:]
+        if len(self.trade_history) > 500:  # 从100增加到500，保留更多历史数据
+            self.trade_history = self.trade_history[-500:]
         try:
             # 先备份当前文件
             self.backup_history()
