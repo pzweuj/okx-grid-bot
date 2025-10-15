@@ -550,6 +550,9 @@ class GridTrader:
                     self.logger.info(f"订单已成交 | ID: {order_id}")
                     # 更新基准价
                     self.base_price = float(updated_order['price'])
+                    # 重置最高价和最低价，让策略基于新基准价重新开始
+                    self.lowest = None
+                    self.highest = None
                     # 清除活跃订单状态
                     self.active_orders[side] = None
                     
@@ -611,6 +614,9 @@ class GridTrader:
                             self.logger.info(f"订单已经成交 | ID: {order_id}")
                             # 处理已成交的订单（与上面相同的逻辑）
                             self.base_price = float(check_order['price'])
+                            # 重置最高价和最低价，让策略基于新基准价重新开始
+                            self.lowest = None
+                            self.highest = None
                             self.active_orders[side] = None
                             trade_info = {
                                 'timestamp': time.time(),
@@ -1669,31 +1675,54 @@ class GridTrader:
             # 计算所需买入资金
             amount_usdt = await self._calculate_order_amount('buy')
             
-            # 获取交易账户余额（现货）
-            trading_balance = await self.exchange.fetch_balance()
+            # 一次性获取所有余额信息（避免重复调用）
+            position_value = await self.risk_manager._get_position_value()
+            balance = await self.exchange.fetch_balance()
+            funding_balance = await self.exchange.fetch_funding_balance()
             
             # 防御性检查：确保返回的余额是有效的
-            if not trading_balance or 'free' not in trading_balance:
+            if not balance or 'free' not in balance:
                 self.logger.error("获取交易账户余额失败，返回无效数据")
                 return False
             
             # 详细日志：显示完整的余额信息用于诊断
-            self.logger.debug(f"交易账户完整余额: free={trading_balance.get('free')}, total={trading_balance.get('total')}")
-                
-            trading_usdt = float(trading_balance.get('free', {}).get('USDT', 0) or 0)
+            self.logger.debug(f"交易账户完整余额: free={balance.get('free')}, total={balance.get('total')}")
             
-            self.logger.info(f"买入前余额检查 | 所需USDT: {amount_usdt:.2f} | 交易账户USDT: {trading_usdt:.2f}")
+            # 提取各账户USDT余额
+            trading_usdt = float(balance.get('free', {}).get('USDT', 0) or 0)
+            funding_usdt = float(funding_balance.get('USDT', 0) or 0)
+            
+            # 计算当前USDT总余额
+            usdt_balance = trading_usdt + funding_usdt
+            
+            # 计算买入后的仓位价值（假设以当前价格买入）
+            new_position_value = position_value + amount_usdt
+            
+            # 计算买入后的总资产
+            total_assets_after_buy = new_position_value + (usdt_balance - amount_usdt)
+            
+            # 计算买入后的仓位比例
+            if total_assets_after_buy > 0:
+                position_ratio_after_buy = new_position_value / total_assets_after_buy
+                
+                # 如果买入后仓位比例会超过最大限制，拒绝买入
+                if position_ratio_after_buy > self.config.MAX_POSITION_RATIO:
+                    self.logger.warning(
+                        f"买入会导致仓位超限 | "
+                        f"当前仓位比例: {(position_value/(position_value+usdt_balance)):.2%} | "
+                        f"买入后仓位比例: {position_ratio_after_buy:.2%} | "
+                        f"最大允许: {self.config.MAX_POSITION_RATIO:.2%}"
+                    )
+                    return False
+            
+            self.logger.info(f"买入前余额检查 | 所需USDT: {amount_usdt:.2f} | 交易账户USDT: {trading_usdt:.2f} | 资金账户USDT: {funding_usdt:.2f}")
             
             # 如果交易账户余额足够，直接返回成功
             if trading_usdt >= amount_usdt:
                 return True
                 
             # 交易账户不足，先检查资金账户
-            self.logger.info(f"交易账户USDT不足，检查资金账户...")
-            funding_balance = await self.exchange.fetch_funding_balance()
-            funding_usdt = float(funding_balance.get('USDT', 0) or 0)
-            
-            self.logger.info(f"资金账户USDT余额: {funding_usdt:.2f}")
+            self.logger.info(f"交易账户USDT不足，尝试从资金账户转账...")
             
             # 如果资金账户有余额，尝试从资金账户转到交易账户
             if funding_usdt > 0:
@@ -1799,12 +1828,43 @@ class GridTrader:
                 self.logger.error("当前价格无效，无法计算币种需求量")
                 return False
             
-            # 计算所需卖出量
-            coin_needed = await self.calculate_trade_amount('sell', current_price) / current_price
+            # 计算所需卖出金额（使用与买入一致的方法）
+            amount_usdt = await self._calculate_order_amount('sell')
+            coin_needed = amount_usdt / current_price
             
-            # 获取现货可用余额
-            spot_balance = await self.exchange.fetch_balance()
-            spot_okb = float(spot_balance.get('free', {}).get(self.symbol_info['base'], 0) or 0)
+            # 先检查卖出后是否会导致仓位过低
+            position_value = await self.risk_manager._get_position_value()
+            balance = await self.exchange.fetch_balance()
+            funding_balance = await self.exchange.fetch_funding_balance()
+            
+            # 计算当前USDT总余额
+            usdt_balance = (
+                float(balance.get('free', {}).get('USDT', 0)) +
+                float(funding_balance.get('USDT', 0))
+            )
+            
+            # 计算卖出后的仓位价值（假设以当前价格卖出）
+            new_position_value = position_value - amount_usdt
+            
+            # 计算卖出后的总资产
+            total_assets_after_sell = new_position_value + (usdt_balance + amount_usdt)
+            
+            # 计算卖出后的仓位比例
+            if total_assets_after_sell > 0:
+                position_ratio_after_sell = new_position_value / total_assets_after_sell
+                
+                # 如果卖出后仓位比例会低于最小限制，拒绝卖出
+                if position_ratio_after_sell < self.config.MIN_POSITION_RATIO:
+                    self.logger.warning(
+                        f"卖出会导致仓位过低 | "
+                        f"当前仓位比例: {(position_value/(position_value+usdt_balance)):.2%} | "
+                        f"卖出后仓位比例: {position_ratio_after_sell:.2%} | "
+                        f"最小允许: {self.config.MIN_POSITION_RATIO:.2%}"
+                    )
+                    return False
+            
+            # 使用已获取的balance，避免重复调用
+            spot_okb = float(balance.get('free', {}).get(self.symbol_info['base'], 0) or 0)
             
             # 检查现货余额是否足够
             self.logger.info(f"卖出前余额检查 | 所需{self.symbol_info['base']}: {coin_needed:.8f} | 现货{self.symbol_info['base']}: {spot_okb:.8f}")
@@ -1813,12 +1873,9 @@ class GridTrader:
                 self.logger.info(f"现货{self.symbol_info['base']}余额充足，可以卖出")
                 return True
             
-            # 现货不足，先检查资金账户
-            self.logger.info(f"现货{self.symbol_info['base']}不足，检查资金账户...")
-            funding_balance = await self.exchange.fetch_funding_balance()
+            # 现货不足，先检查资金账户（使用已获取的funding_balance）
             funding_okb = float(funding_balance.get(self.symbol_info['base'], 0) or 0)
-            
-            self.logger.info(f"资金账户{self.symbol_info['base']}余额: {funding_okb:.8f}")
+            self.logger.info(f"现货{self.symbol_info['base']}不足 | 资金账户{self.symbol_info['base']}余额: {funding_okb:.8f}")
             
             # 如果资金账户有余额，尝试从资金账户转到现货
             if funding_okb > 0:
