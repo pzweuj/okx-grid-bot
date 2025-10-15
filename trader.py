@@ -84,9 +84,7 @@ class GridTrader:
                         raise
                     await asyncio.sleep(2)
             
-            # 检查现货账户资金并划转
-            await self._check_and_transfer_initial_funds()
-            
+            # 初始化交易对信息
             self.symbol_info = {'base': BASE_SYMBOL}
             
             # 优先使用.env配置的基准价
