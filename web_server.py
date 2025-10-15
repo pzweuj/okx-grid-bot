@@ -8,7 +8,6 @@ import psutil
 import secrets
 from aiohttp_session import setup, get_session
 from aiohttp_session.cookie_storage import EncryptedCookieStorage
-from cryptography import fernet
 
 class IPLogger:
     def __init__(self):
@@ -604,9 +603,8 @@ async def handle_status(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def start_web_server(trader):
-    # 生成密钥用于加密cookie
-    fernet_key = fernet.Fernet.generate_key()
-    secret_key = fernet_key
+    # 生成密钥用于加密cookie (32字节)
+    secret_key = secrets.token_bytes(32)
     
     app = web.Application()
     
